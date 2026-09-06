@@ -1,0 +1,578 @@
+#!/usr/bin/env python3
+"""Add animated (per-button) assets to .deltaskin controller skins.
+
+Delta commit 3e651d9 ("Supports animated controller skins"), with DeltaCore
+633dfa8, made every item in info.json able to carry an
+
+    "asset": { "name": "...", "width": ..., "height": ... }
+
+dictionary. DeltaCore draws that image in its own UIImageView, sized `width` x
+`height` mapping units and centred on the midpoint of the item's frame, and on
+touch transforms it: buttons scale in by 2pt per side, d-pads tilt in 3D as if
+pressed 3pt at the edge (plus 1pt into the screen overall).
+
+Riley's own animated skins cut each button out of the layered source art, so
+their base image has a hole where the button used to be. We only have the
+flattened PNG, and can't punch holes in it because Delta's skin picker renders
+the base image alone (see LoadControllerSkinImageOperation), so the button would
+vanish from the thumbnail. So each overlay here is cut from the flattened image
+and left sitting exactly where it came from:
+
+* At rest it is a pixel-identical copy of what is underneath, and so invisible.
+* When pressed, it needs to carry a band of surrounding background with it,
+  because the original button is still in the base image and the band is what
+  covers up its old edge as the overlay shrinks.
+
+That band is what makes this delicate: it has to be wide enough to cover the
+edge the button moved away from, but must not pick up any *other* artwork, or
+that gets dragged along too. `skinlib.band_alpha` grows it out from the artwork
+through smooth background only, stopping at any edge that isn't the button's
+own, and fades out the last few points.
+
+Input skins are never modified; rebuilt copies are written to the output
+directory.
+
+    python3 animate.py "My Skin.deltaskin"
+    python3 animate.py *.deltaskin -o animated
+"""
+
+import argparse
+import json
+import math
+import os
+import shutil
+import sys
+import zipfile
+
+from PIL import Image, ImageChops, ImageFilter
+
+import press
+from skinlib import (EDGE_THRESHOLDS, Skin, band_alpha, detect_interior, kind, label,
+                     pixels_per_point, representations, shape_interior, wall_map)
+
+MIN_SIDE = 30              # mapping units; below this a frame is a hint, not a button
+MAX_AREA_FRACTION = 0.08   # skips full-screen items such as `fastForward`
+SCREEN_OVERLAP = 0.5       # skips items mostly covering an emulator screen
+MIN_ART_FRACTION = 0.35    # of the frame's area, else we only found a detail of it
+DPAD_ART_FRACTION = 0.15   # d-pads are mostly gaps: four C buttons, or a thin cross
+OVERLAP_TOLERANCE = 0.3    # of the smaller artwork's area
+
+# How far out to look for a button's artwork, as a multiple of its frame size.
+# Frames are often smaller than the art they sit on (and sometimes off-centre),
+# so this grows until the artwork and its band fit with room to spare.
+SEARCH_MARGINS = (0.75, 1.25, 2.0)
+
+# Band widths to try, in points, narrowest first. A press moves the artwork's
+# edge inwards by at most the press depth -- 2pt for a button, and about 4pt for
+# the far corner of a tilted d-pad -- so a band a shade wider than that is all it
+# takes to cover where the artwork was, and anything wider than that only makes
+# the overlay bigger and the animation weaker. `band_for` measures the real
+# transform rather than trusting these, and steps up only if it has to.
+BAND_CANDIDATES = {False: (2.25, 3.0, 4.0, 5.5), True: (4.5, 5.5, 7.0, 9.0)}
+FEATHER_POINTS = {False: 1.5, True: 2.0}
+PRESS_PAD = 32          # px of room around an overlay for a tilt to expand into
+
+# What counts as covered. A press may leave a hairline of the artwork uncovered
+# where it runs right up against something else -- the N64's A button is tangent
+# to the edge of its plate, so its band has nowhere to grow on that side -- as
+# long as the gap stays thin and stays local. A gap that is thicker than a hair,
+# or that rings the whole button, is a ghosted edge and is not accepted.
+MAX_GHOST = 1           # px of erosion a gap may survive (about 3px wide)
+MAX_GHOST_AREA = 0.02   # of the artwork's area
+
+# Last resort for artwork whose band is fenced in before it is wide enough:
+# padding the asset box by these fractions of its size damps the movement, which
+# shrinks what a press can expose, at the cost of a less lively button.
+DAMPING_STEPS = (0.2, 0.5, 1.0, 2.0)
+
+
+def rect(frame):
+    return (frame['x'], frame['y'],
+            frame['x'] + frame['width'], frame['y'] + frame['height'])
+
+
+def contains(outer, inner):
+    return (outer[0] <= inner[0] and outer[1] <= inner[1]
+            and outer[2] >= inner[2] and outer[3] >= inner[3])
+
+
+def overlap(a, b):
+    if a is None or b is None:
+        return 0
+    dx = min(a[2], b[2]) - max(a[0], b[0])
+    dy = min(a[3], b[3]) - max(a[1], b[1])
+    return dx * dy if dx > 0 and dy > 0 else 0
+
+
+def area(box):
+    return (box[2] - box[0]) * (box[3] - box[1])
+
+
+def base_reject(item, rep):
+    """Reasons an item can never be animated, independent of the artwork."""
+    item_kind = kind(item)
+    if item_kind in ('touchScreen', 'thumbstick'):
+        return item_kind                      # thumbsticks DeltaCore animates itself
+    if isinstance(item['inputs'], list) and len(item['inputs']) > 1:
+        return 'combo zone'
+
+    frame = item['frame']
+    mapping = rep['mappingSize']
+    if (frame['width'] * frame['height']) / (mapping['width'] * mapping['height']) > MAX_AREA_FRACTION:
+        return 'too large'
+    if min(frame['width'], frame['height']) < MIN_SIDE:
+        return 'too small (%gpt)' % round(min(frame['width'], frame['height']) / 3, 1)
+
+    for screen in rep.get('screens', []):
+        output = screen.get('outputFrame')
+        if output and overlap(rect(frame), rect(output)) > SCREEN_OVERLAP * area(rect(frame)):
+            return 'sits on screen'
+    return None
+
+
+def padded_crop(base, box):
+    """Crop `base` over `box`, which may hang off the image, plus a mask of the
+    part that does. Off-image area is transparent and treated as a hard edge, so
+    the artwork search neither leaks into it nor grows a band over it."""
+    crop = Image.new('RGBA', (box[2] - box[0], box[3] - box[1]))
+    inner = (max(box[0], 0), max(box[1], 0), min(box[2], base.width), min(box[3], base.height))
+    outside = Image.new('L', crop.size, 255)
+    if inner[2] > inner[0] and inner[3] > inner[1]:
+        crop.paste(base.crop(inner), (inner[0] - box[0], inner[1] - box[1]))
+        outside.paste(Image.new('L', (inner[2] - inner[0], inner[3] - inner[1]), 0),
+                      (inner[0] - box[0], inner[1] - box[1]))
+    return crop, outside
+
+
+def search_area(base, frame, margin):
+    """A region of the skin centred on `frame`, `margin` frame-widths wider on
+    each side, along with where the frame sits in it and which of its sides hang
+    off the skin (artwork is allowed to run off those)."""
+    centre = (frame['x'] + frame['width'] / 2.0, frame['y'] + frame['height'] / 2.0)
+    half_w, half_h = frame['width'] * (0.5 + margin), frame['height'] * (0.5 + margin)
+    box = (int(centre[0] - half_w), int(centre[1] - half_h),
+           int(centre[0] + half_w) + 1, int(centre[1] + half_h) + 1)
+    crop, outside = padded_crop(base, box)
+    return {
+        'box': box, 'crop': crop, 'outside': outside,
+        'frame_box': (frame['x'] - box[0], frame['y'] - box[1],
+                      frame['x'] + frame['width'] - box[0], frame['y'] + frame['height'] - box[1]),
+        'open_sides': tuple(side for side, off in (
+            ('left', box[0] < 0), ('top', box[1] < 0),
+            ('right', box[2] > base.width), ('bottom', box[3] > base.height)) if off),
+    }
+
+
+def overlay_for(view, walls, interior, pixels, ppp, is_dpad, source):
+    """A candidate detection, measured with the widest band it might end up using
+    so that `contained` stays true of the overlay actually built later."""
+    widest = max(1, round(BAND_CANDIDATES[is_dpad][-1] * ppp))
+    feather = max(1, round(FEATHER_POINTS[is_dpad] * ppp))
+    alpha, _ = band_alpha(view['crop'], interior, walls, ppp, widest, feather)
+    span = alpha.getbbox()
+    if span is None:
+        return None
+    crop, open_sides = view['crop'], view['open_sides']
+    return {
+        'view': view, 'walls': walls, 'interior': interior,
+        'source': source, 'pixels': pixels,
+        # Room to spare on every side means the band ended on its own terms
+        # rather than being cut off by the edge of the search area.
+        'contained': ((span[0] > 0 or 'left' in open_sides)
+                      and (span[1] > 0 or 'top' in open_sides)
+                      and (span[2] < crop.width or 'right' in open_sides)
+                      and (span[3] < crop.height or 'bottom' in open_sides)),
+        'art': tuple(v + view['box'][i % 2] for i, v in enumerate(interior.getbbox())),
+    }
+
+
+def find_art(base, item, ppp):
+    """Locate an item's artwork.
+
+    Returns a dict with the alpha covering the artwork and its band, where in the
+    image that alpha sits, the artwork's own bounds, and how it was found. Widens
+    the search area until the band ends on its own terms rather than being cut off
+    by the edge of that area, and relaxes the edge threshold until the artwork is
+    a decent fraction of the item's frame. Failing both, falls back to the frame's
+    shape, so the button animates regardless."""
+    frame = item['frame']
+    is_dpad = kind(item) == 'dPad'
+    enough = (DPAD_ART_FRACTION if is_dpad else MIN_ART_FRACTION) * frame['width'] * frame['height']
+    best = None
+
+    for margin in SEARCH_MARGINS:
+        view = search_area(base, frame, margin)
+        for threshold in EDGE_THRESHOLDS:
+            walls = wall_map(view['crop'], threshold, view['outside'])
+            interior, pixels = detect_interior(walls, view['frame_box'], view['open_sides'])
+            if interior is None:
+                continue
+            found = overlay_for(view, walls, interior, pixels, ppp, is_dpad, 'detected')
+            if found is None:
+                continue
+            if best is None or (found['contained'], found['pixels']) > (best['contained'], best['pixels']):
+                best = found
+            if found['contained'] and pixels >= enough:
+                return found
+
+    # Nothing convincing: animate the frame's shape instead.
+    view = search_area(base, frame, SEARCH_MARGINS[0])
+    walls = wall_map(view['crop'], EDGE_THRESHOLDS[0], view['outside'])
+    interior = shape_interior(view['crop'].size, view['frame_box'])
+    pixels = sum(1 for value in interior.getdata() if value)
+    shaped = overlay_for(view, walls, interior, pixels, ppp, is_dpad, 'frame shape')
+    if shaped is not None and (best is None or not best['contained']
+                               or best['pixels'] < enough):
+        return shaped
+    return best
+
+
+def exposure(alpha, art_mask, offset, box, ppp, is_dpad):
+    """The worst fraction of the artwork a press leaves uncovered.
+
+    Runs the artwork's own shape through DeltaCore's transform -- every d-pad
+    direction, not just one -- and asks whether the overlay, once moved, still
+    covers everywhere the artwork used to be. Anywhere it doesn't, the base
+    image's copy of the button shows through as a ghosted edge. This is the
+    measurement the band width is chosen to satisfy."""
+    width, height = box[2] - box[0], box[3] - box[1]
+    canvas = (width + 2 * PRESS_PAD, height + 2 * PRESS_PAD)
+    at = (offset[0] - box[0] + PRESS_PAD, offset[1] - box[1] + PRESS_PAD)
+
+    rest = Image.new('L', canvas)
+    rest.paste(alpha, at)
+    art = Image.new('L', canvas)
+    art.paste(art_mask, at)
+    art = ImageChops.multiply(art, rest).point(lambda v: 255 if v >= 250 else 0)
+    total = art.histogram()[255]
+    if not total:
+        return 0.0
+
+    source = [(PRESS_PAD, PRESS_PAD), (PRESS_PAD + width, PRESS_PAD),
+              (PRESS_PAD + width, PRESS_PAD + height), (PRESS_PAD, PRESS_PAD + height)]
+    centre = (PRESS_PAD + width / 2.0, PRESS_PAD + height / 2.0)
+
+    # Area and thickness are tracked separately: the state that leaves the most
+    # uncovered is not always the one that leaves the thickest gap, and it is the
+    # thickest gap that gets noticed.
+    worst_area, worst_thickness = 0.0, 0
+    for state in press.states(is_dpad):
+        quad = press.quad(width / ppp, height / ppp, state)
+        destination = [(centre[0] + x * ppp, centre[1] + y * ppp) for x, y in quad]
+        coefficients = press.perspective_coefficients(destination, source)
+        pressed = rest.transform(canvas, Image.PERSPECTIVE, coefficients, Image.BILINEAR)
+        # Resampling softens the overlay's edge, so allow the cover to fall a
+        # pixel short of where it lands: less than that is invisible anyway.
+        covered = pressed.point(lambda v: 255 if v >= 200 else 0)
+        gap = ImageChops.subtract(art, covered.filter(ImageFilter.MaxFilter(3)))
+        worst_area = max(worst_area, gap.histogram()[255] / total)
+        worst_thickness = max(worst_thickness, thickness(gap))
+    return worst_area, worst_thickness
+
+
+def thickness(mask):
+    """Roughly half the width of the widest part of `mask`, in pixels.
+
+    Area alone doesn't say whether a gap will be seen: a hairline where a button
+    happens to touch something else is invisible, while a gap of the same area
+    spread as an even ring around the button is the ghosted edge we are trying to
+    avoid. Eroding tells the two apart."""
+    for radius in range(1, MAX_GHOST + 2):
+        if mask.filter(ImageFilter.MinFilter(2 * radius + 1)).getbbox() is None:
+            return radius - 1
+    return MAX_GHOST + 1
+
+
+def build_overlay(entry, ppp, is_dpad, centre):
+    """Settle on a band width and an asset box for a detected item.
+
+    Tries each band in turn and stops at the first that covers the artwork under
+    every press, so the overlay stays as small as it can and the button moves as
+    much as Riley's do. If even the widest band is fenced in too tightly to cover
+    -- the N64's A button, hemmed in by the edge of the plate it sits on -- the
+    asset box is padded out instead, which damps the movement until what is left
+    is small enough to hide. Less animation, but no ghost either way."""
+    feather = max(1, round(FEATHER_POINTS[is_dpad] * ppp))
+    offset = (entry['view']['box'][0], entry['view']['box'][1])
+    best = None
+
+    for points in BAND_CANDIDATES[is_dpad]:
+        alpha, art_mask = band_alpha(entry['view']['crop'], entry['interior'],
+                                     entry['walls'], ppp, max(1, round(points * ppp)), feather)
+        span = alpha.getbbox()
+        if span is None:
+            continue
+        tight = asset_box(tuple(v + offset[i % 2] for i, v in enumerate(span)), centre)
+
+        for damping in (0,) + DAMPING_STEPS:
+            pad = (round(damping * (tight[2] - tight[0]) / 2.0),
+                   round(damping * (tight[3] - tight[1]) / 2.0))
+            box = (tight[0] - pad[0], tight[1] - pad[1], tight[2] + pad[0], tight[3] + pad[1])
+            built = {'alpha': alpha, 'art_mask': art_mask, 'offset': offset, 'box': box,
+                     'band': points, 'damping': damping,
+                     'exposed': exposure(alpha, art_mask, offset, box, ppp, is_dpad)}
+            built['travel'] = travel(built, ppp, is_dpad)
+            if best is None or preferred(built, best):
+                best = built
+            if covered(built['exposed']):
+                break               # damping only costs movement from here on
+
+        # A band this narrow covering on its own is as good as it gets: every
+        # wider one carries more and moves less.
+        if best is not None and covered(best['exposed']) and best['damping'] == 0:
+            break
+    return best
+
+
+def covered(exposed):
+    fraction, thick = exposed
+    return thick <= MAX_GHOST and fraction <= MAX_GHOST_AREA
+
+
+def preferred(candidate, incumbent):
+    """Covering beats not covering; then more movement; then less exposure."""
+    if covered(candidate['exposed']) != covered(incumbent['exposed']):
+        return covered(candidate['exposed'])
+    if covered(candidate['exposed']):
+        return candidate['travel'][0] > incumbent['travel'][0]
+    return candidate['exposed'] < incumbent['exposed']
+
+
+def travel(built, ppp, is_dpad):
+    """Points the artwork's edge moves when pressed, and what fraction that is of
+    the movement Riley's own skins get. Anything the overlay carries beyond the
+    artwork itself scales the movement down, so this is the honest measure of how
+    responsive a button will look."""
+    depth = press.DPAD_EDGE_DEPTH if is_dpad else press.BUTTON_DEPTH
+    span = built['art_mask'].getbbox()
+    if span is None:
+        return 0.0, 0.0
+    offset, box = built['offset'], built['box']
+    art = tuple(v + offset[i % 2] for i, v in enumerate(span))
+    centre = ((box[0] + box[2]) / 2.0, (box[1] + box[3]) / 2.0)
+    reach = max(centre[0] - art[0], art[2] - centre[0],
+                centre[1] - art[1], art[3] - centre[1])
+    half = max(box[2] - box[0], box[3] - box[1]) / 2.0
+    moved = depth * reach / half
+    return moved, moved / depth
+
+
+def asset_box(span, centre):
+    """Smallest whole-pixel box symmetric about `centre` that contains `span`.
+
+    Symmetry is not optional: DeltaCore centres the overlay on the midpoint of
+    the item's frame, so that midpoint is the only place the box can be centred
+    on and still land back where the pixels were cut from."""
+    def half(need, middle):
+        # A half-pixel centre needs a half-pixel half-extent to land on whole pixels.
+        if middle == int(middle):
+            return math.ceil(need)
+        return math.ceil(need - 0.5) + 0.5
+
+    half_w = half(max(centre[0] - span[0], span[2] - centre[0]), centre[0])
+    half_h = half(max(centre[1] - span[1], span[3] - centre[1]), centre[1])
+    return (int(centre[0] - half_w), int(centre[1] - half_h),
+            int(centre[0] + half_w), int(centre[1] + half_h))
+
+
+def process(skin, out_dir, verbose=True):
+    info = json.loads(json.dumps(skin.info))
+    total = 0
+
+    for key, rep in representations(info):
+        assets = rep['assets']
+        if len(set(assets.values())) > 1 and verbose:
+            print('     ! %s draws from %d different images; overlays are cut from %s'
+                  % ('/'.join(key), len(set(assets.values())), list(assets)[0]))
+        base = skin.image(list(assets.values())[0])
+        ppp = pixels_per_point(key, base)
+        if verbose:
+            print('  %s  %dx%d' % ('/'.join(key), base.width, base.height))
+
+        found, rejected = [], []
+        for index, item in enumerate(rep['items']):
+            reason = base_reject(item, rep)
+            if reason:
+                rejected.append((index, item, reason))
+                continue
+            entry = find_art(base, item, ppp)
+            if entry is None:
+                rejected.append((index, item, 'no artwork found'))
+                continue
+            entry.update(index=index, item=item)
+            found.append(entry)
+
+        # One overlay can only show one item's artwork, so items that resolve to
+        # the same art can't both animate. A d-pad keeps it: it is one piece of
+        # art shared by four or more inputs, and its tilt is the whole point (the
+        # N64's Z sits inside the C cluster, so the cluster tilts and Z rides
+        # along with it). Failing that a frame sitting inside another's gives way,
+        # and failing that the item with the larger artwork does, being the more
+        # likely to have caught something that isn't its own.
+        # Resolve one at a time, since dropping one can settle others.
+        while True:
+            clash = None
+            for i, a in enumerate(found):
+                for b in found[i + 1:]:
+                    if overlap(a['art'], b['art']) <= OVERLAP_TOLERANCE * min(area(a['art']), area(b['art'])):
+                        continue
+                    a_moves, b_moves = kind(a['item']) != 'button', kind(b['item']) != 'button'
+                    if a_moves != b_moves:
+                        loser, winner = (b, a) if a_moves else (a, b)
+                        clash = (loser, 'artwork is item %d\'s' % winner['index'])
+                    elif contains(rect(a['item']['frame']), rect(b['item']['frame'])):
+                        clash = (b, 'artwork is item %d\'s' % a['index'])
+                    elif contains(rect(b['item']['frame']), rect(a['item']['frame'])):
+                        clash = (a, 'artwork is item %d\'s' % b['index'])
+                    else:
+                        inner, outer = sorted((a, b), key=lambda e: area(e['art']))
+                        clash = (outer, 'shares artwork with item %d' % inner['index'])
+                    break
+                if clash:
+                    break
+            if not clash:
+                break
+            loser, reason = clash
+            found.remove(loser)
+            rejected.append((loser['index'], loser['item'], reason))
+
+        used = set()
+        for entry in sorted(found, key=lambda e: e['index']):
+            item = entry['item']
+            frame = item['frame']
+            centre = (frame['x'] + frame['width'] / 2.0, frame['y'] + frame['height'] / 2.0)
+            is_dpad = kind(item) == 'dPad'
+            built = build_overlay(entry, ppp, is_dpad, centre)
+            if built is None:
+                rejected.append((entry['index'], item, 'no artwork found'))
+                continue
+            alpha, offset, box = built['alpha'], built['offset'], built['box']
+
+            overlay, _ = padded_crop(base, box)
+            cut = Image.new('L', overlay.size)
+            cut.paste(alpha, (offset[0] - box[0], offset[1] - box[1]))
+            overlay.putalpha(cut)
+
+            stem = 'anim_%s_%s' % (key[2], label(item))
+            name, suffix = stem + '.png', 2
+            while name in used:
+                name, suffix = '%s_%d.png' % (stem, suffix), suffix + 1
+            used.add(name)
+
+            overlay.save(os.path.join(out_dir, name), optimize=True)
+            item['asset'] = {'name': name, 'width': box[2] - box[0], 'height': box[3] - box[1]}
+            for existing in [k for k in list(item) if k != 'asset']:
+                item[existing] = item.pop(existing)     # keep `asset` first, as Riley's skins do
+            total += 1
+
+            if verbose:
+                art = entry['art']
+                moved, fraction = built['travel']
+                notes = ['%s' % entry['source'], 'band %.2fpt' % built['band']]
+                if built['damping']:
+                    notes.append('damped %.0f%%' % (100 * built['damping']))
+                if not covered(built['exposed']):
+                    notes.append('EXPOSES %.1f%% of artwork, %dpx thick'
+                                 % (100 * built['exposed'][0], 2 * built['exposed'][1] + 1))
+                print('     + %-18s frame %dx%d  art %dx%d  asset %dx%d  '
+                      'moves %.2fpt (%.0f%%)  [%s]'
+                      % (label(item), frame['width'], frame['height'],
+                         art[2] - art[0], art[3] - art[1],
+                         box[2] - box[0], box[3] - box[1], moved, 100 * fraction,
+                         ', '.join(notes)))
+        if verbose:
+            for index, item, reason in sorted(rejected, key=lambda entry: entry[0]):
+                print('     - %-18s %s' % (label(item), reason))
+
+    for name in skin.names():
+        if name != 'info.json':
+            with open(os.path.join(out_dir, os.path.basename(name)), 'wb') as file:
+                file.write(skin.read(name))
+    with open(os.path.join(out_dir, 'info.json'), 'w') as file:
+        json.dump(info, file, indent=2)
+        file.write('\n')
+    return total
+
+
+def archive(out_dir, destination):
+    with zipfile.ZipFile(destination, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for name in sorted(os.listdir(out_dir)):
+            if not name.startswith('.'):
+                zf.write(os.path.join(out_dir, name), name)
+
+
+def collect(paths):
+    """Every skin named by `paths`, which may be packages or directories holding
+    them. An unpacked skin is itself a directory, so it is taken as a package if
+    it has an info.json and searched for packages otherwise."""
+    found = []
+    for path in paths:
+        path = os.path.abspath(os.path.expanduser(path))
+        if not os.path.exists(path):
+            sys.exit('no such file or directory: %s' % path)
+        if os.path.isdir(path) and not os.path.exists(os.path.join(path, 'info.json')):
+            inside = sorted(name for name in os.listdir(path)
+                            if name.endswith('.deltaskin') and not name.startswith('.'))
+            if not inside:
+                sys.exit('no .deltaskin packages in %s' % path)
+            found.extend(os.path.join(path, name) for name in inside)
+        else:
+            found.append(path)
+    return found
+
+
+def parse(argv):
+    parser = argparse.ArgumentParser(
+        prog='animate.py', description=__doc__.split('\n\n')[0],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='Originals are never modified. Run verify.py afterwards to check '
+               'the result and to render what a press will look like.')
+    parser.add_argument('skins', nargs='+', metavar='SKIN',
+                        help='.deltaskin packages, or directories containing them')
+    parser.add_argument('-o', '--output', default='animated', metavar='DIR',
+                        help='where to write the rebuilt skins (default: ./animated)')
+    parser.add_argument('-q', '--quiet', action='store_true',
+                        help='only report the per-skin totals')
+    parser.add_argument('--keep-staging', action='store_true',
+                        help='keep the unpacked build directories for inspection')
+    return parser.parse_args(argv)
+
+
+def main(argv=None):
+    options = parse(argv)
+    output = os.path.abspath(os.path.expanduser(options.output))
+    staging = os.path.join(output, '.staging')
+    os.makedirs(output, exist_ok=True)
+
+    skins = collect(options.skins)
+    for path in skins:
+        # An overlay cut from an already-animated base would be wrong, and the
+        # original would be gone, so check before doing any work.
+        if os.path.join(output, os.path.basename(path)) == path:
+            sys.exit('refusing to overwrite the original: %s\n'
+                     'choose an --output directory other than the skin\'s own.' % path)
+
+    total = 0
+    for path in skins:
+        name = os.path.basename(path)
+        print(name)
+        out_dir = os.path.join(staging, name)
+        shutil.rmtree(out_dir, ignore_errors=True)
+        os.makedirs(out_dir)
+        count = process(Skin(path), out_dir, verbose=not options.quiet)
+        destination = os.path.join(output, name)
+        archive(out_dir, destination)
+        if not options.keep_staging:
+            shutil.rmtree(out_dir, ignore_errors=True)
+        total += count
+        print('  %d animated items -> %s\n' % (count, destination))
+
+    if not options.keep_staging:
+        shutil.rmtree(staging, ignore_errors=True)
+    print('%d animated items across %d skin%s.'
+          % (total, len(skins), '' if len(skins) == 1 else 's'))
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

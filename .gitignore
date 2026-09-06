@@ -1,0 +1,10 @@
+# Skins are the user's own; this repository ships none.
+*.deltaskin
+
+# Default output directories.
+animated/
+renders/
+
+__pycache__/
+*.pyc
+.DS_Store
