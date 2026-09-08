@@ -159,6 +159,37 @@ def fill_holes(data, size):
             data[i] = 255
 
 
+def largest_regions(mask, share=0.05):
+    """`mask` with its specks dropped: every 255-region smaller than `share` of
+    the biggest one.
+
+    Interior detection picks up the odd speck of highlight a few pixels across.
+    An overlay swallows one harmlessly, since it sits well inside the artwork the
+    overlay carries, but a glow grown from the same mask blooms it into a visible
+    blob of its own out in the middle of the shell."""
+    span = mask.getbbox()
+    if span is None:
+        return mask
+
+    scan, width = to_bytes(mask), mask.width
+    seeds = []
+    for y in range(span[1], span[3]):
+        row = y * width
+        for x in range(span[0], span[2]):
+            if scan[row + x] == 255:
+                seeds.append((flood(scan, mask.size, (x, y), 254)[0], (x, y)))
+
+    biggest = max((area for area, _ in seeds), default=0)
+    if all(area >= biggest * share for area, _ in seeds):
+        return mask
+
+    data = to_bytes(mask)
+    for area, seed in seeds:
+        if area < biggest * share:
+            flood(data, mask.size, seed, 0)
+    return to_image(data, mask.size)
+
+
 def dilate(mask, radius):
     """Chebyshev dilation, in steps Pillow can do in C."""
     while radius > 0:

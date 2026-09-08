@@ -29,11 +29,17 @@ that gets dragged along too. `skinlib.band_alpha` grows it out from the artwork
 through smooth background only, stopping at any edge that isn't the button's
 own, and fades out the last few points.
 
+`--glow` adds a second kind of feedback on top: a soft white halo that blooms
+around the button being held. That one rides on a DeltaCore feature nothing in
+Delta exposes -- a `_pressed` companion to the skin's image -- and `glow.py`
+explains what it takes to use it without disturbing a single touch target.
+
 Input skins are never modified; rebuilt copies are written to the output
 directory.
 
     python3 animate.py "My Skin.deltaskin"
     python3 animate.py *.deltaskin -o animated
+    python3 animate.py *.deltaskin -o glowing --glow
 """
 
 import argparse
@@ -44,11 +50,19 @@ import shutil
 import sys
 import zipfile
 
-from PIL import Image, ImageChops, ImageFilter
+from PIL import Image, ImageChops, ImageColor, ImageFilter
 
+import glow
 import press
 from skinlib import (EDGE_THRESHOLDS, Skin, band_alpha, detect_interior, kind, label,
-                     pixels_per_point, representations, shape_interior, wall_map)
+                     largest_regions, pixels_per_point, representations,
+                     shape_interior, wall_map)
+
+GLOW_TAG = 'GLOW'          # what a glowing build is renamed to, so both can install
+
+# Colours worth naming that CSS doesn't have. Pillow understands every CSS name,
+# and amber -- the one a pale shell actually wants -- isn't one of them.
+GLOW_COLORS = {'amber': '#ffb300', 'warmwhite': '#fff3e0'}
 
 MIN_SIDE = 30              # mapping units; below this a frame is a hint, not a button
 MAX_AREA_FRACTION = 0.08   # skips full-screen items such as `fastForward`
@@ -69,7 +83,18 @@ SEARCH_MARGINS = (0.75, 1.25, 2.0)
 # the overlay bigger and the animation weaker. `band_for` measures the real
 # transform rather than trusting these, and steps up only if it has to.
 BAND_CANDIDATES = {False: (2.25, 3.0, 4.0, 5.5), True: (4.5, 5.5, 7.0, 9.0)}
-FEATHER_POINTS = {False: 1.5, True: 2.0}
+
+# How far the band's outer edge takes to fade out. The band is background carried
+# along with the button, and when the button moves so does the background in it --
+# so wherever that background isn't flat, the band's own edge shows as a ghost of
+# whatever it holds, displaced by the press. The N64's A button sits on a shiny grey
+# plate and came out with a faint ring around it for exactly this reason. A longer
+# fade spreads that difference out until it can't be seen; what it costs is opaque
+# band, and the band only has to be opaque as far as the artwork's edge travels --
+# about 2pt -- so there is room for a good deal more fade than there looks to be.
+# `build_overlay` measures coverage on the real alpha, so a fade that did eat too
+# much would show up as a wider band or more damping rather than as a ghost.
+FEATHER_POINTS = {False: 3.0, True: 3.5}
 PRESS_PAD = 32          # px of room around an overlay for a tilt to expand into
 
 # What counts as covered. A press may leave a hairline of the artwork uncovered
@@ -375,9 +400,13 @@ def asset_box(span, centre):
             int(centre[0] + half_w), int(centre[1] + half_h))
 
 
-def process(skin, out_dir, verbose=True):
+def process(skin, out_dir, verbose=True, animating=True, glowing=False,
+            points=glow.GLOW_POINTS, opacity=glow.GLOW_OPACITY,
+            color=glow.GLOW_COLOR, tag=GLOW_TAG, sharing=glow.GLOW_SHARE,
+            inputs=glow.GLOW_INPUTS):
     info = json.loads(json.dumps(skin.info))
-    total = 0
+    total = glows = extras = 0
+    fields = {}         # asset filename -> (base image, accumulated glow alpha)
 
     for key, rep in representations(info):
         assets = rep['assets']
@@ -436,15 +465,29 @@ def process(skin, out_dir, verbose=True):
             found.remove(loser)
             rejected.append((loser['index'], loser['item'], reason))
 
-        used = set()
+        used, sources, plain = set(), {}, []
         for entry in sorted(found, key=lambda e: e['index']):
             item = entry['item']
             frame = item['frame']
             centre = (frame['x'] + frame['width'] / 2.0, frame['y'] + frame['height'] / 2.0)
             is_dpad = kind(item) == 'dPad'
-            built = build_overlay(entry, ppp, is_dpad, centre)
-            if built is None:
+            built = build_overlay(entry, ppp, is_dpad, centre) if animating else None
+            if animating and built is None:
                 rejected.append((entry['index'], item, 'no artwork found'))
+                continue
+
+            if glowing and not glow.worth_glowing(item, inputs):
+                plain.append(label(item))
+            elif glowing:
+                # The button's own face, not the artwork the overlay moves: that
+                # one takes the surrounding shadow with it, which would start the
+                # halo a dozen pixels out into the shell and cost it that much
+                # reach for nothing. `glow.visible` grows it back out to the
+                # button's edge, which is where the halo belongs.
+                sources[entry['index']] = (largest_regions(entry['interior']),
+                                           (entry['view']['box'][0],
+                                            entry['view']['box'][1]))
+            if not animating:
                 continue
             alpha, offset, box = built['alpha'], built['offset'], built['box']
 
@@ -484,14 +527,60 @@ def process(skin, out_dir, verbose=True):
             for index, item, reason in sorted(rejected, key=lambda entry: entry[0]):
                 print('     - %-18s %s' % (label(item), reason))
 
+        if glowing and sources:
+            notes = []
+            field, companions, halos = glow.build(rep, base.size, sources, points,
+                                                  ppp, notes, sharing)
+            # Must be appended only after `build`, which indexes the real items.
+            rep['items'].extend(companions)
+            glows += len(halos)
+            extras += len(companions)
+
+            asset = list(assets.values())[0]
+            if asset in fields and verbose:
+                print('     ! %s is shared with another representation; its glows '
+                      'are merged' % asset)
+            # Every image the representation can draw needs a `_pressed` companion
+            # of its own: DeltaCore looks one up beside whichever asset size it
+            # picked, and finding none just means no glow. In these skins all three
+            # sizes are the same file; where they differ the field is scaled to fit.
+            for name in dict.fromkeys(assets.values()):
+                image = base if name == asset else skin.image(name)
+                alpha = (field if image.size == field.size
+                         else field.resize(image.size, Image.LANCZOS))
+                existing = fields.get(name)
+                fields[name] = (image, ImageChops.lighter(existing[1], alpha)
+                                if existing else alpha)
+
+            if verbose:
+                print('     %sglow %.1fpt around %d items, %d mask companions%s'
+                      % ('' if tuple(color) == (255, 255, 255)
+                         else '#%02x%02x%02x ' % tuple(color),
+                         points, len(halos), len(companions),
+                         '  (no glow: %s)' % ', '.join(plain) if plain else ''))
+                for note in notes:
+                    index, text = note.split(': ', 1)
+                    print('     ~ %-18s %s' % (label(rep['items'][int(index)]), text))
+
     for name in skin.names():
         if name != 'info.json':
             with open(os.path.join(out_dir, os.path.basename(name)), 'wb') as file:
                 file.write(skin.read(name))
+    for asset, (base, field) in fields.items():
+        glow.apply(base, field, opacity, color).save(
+            os.path.join(out_dir, os.path.basename(glow.pressed_name(asset))),
+            optimize=True)
+    if glowing:
+        info['name'] = '%s [%s]' % (info['name'], tag)
+        info['identifier'] = '%s.%s' % (info['identifier'], tag.lower())
+        # What the halo was made of, for verify.py to check the pressed images
+        # against. DeltaCore reads the keys it knows and ignores the rest.
+        info['glow'] = {'color': '#%02x%02x%02x' % tuple(color),
+                        'points': points, 'opacity': opacity}
     with open(os.path.join(out_dir, 'info.json'), 'w') as file:
         json.dump(info, file, indent=2)
         file.write('\n')
-    return total
+    return {'animated': total, 'glowing': glows, 'companions': extras}
 
 
 def archive(out_dir, destination):
@@ -535,7 +624,79 @@ def parse(argv):
                         help='only report the per-skin totals')
     parser.add_argument('--keep-staging', action='store_true',
                         help='keep the unpacked build directories for inspection')
-    return parser.parse_args(argv)
+
+    glowing = parser.add_argument_group(
+        'glow', 'A soft halo around each button while it is held down. The '
+                'build is renamed so it installs alongside a plain animated one '
+                'instead of replacing it.')
+    glowing.add_argument('--glow', action='store_true',
+                         help='also add the halo')
+    glowing.add_argument('--glow-points', type=float, default=glow.GLOW_POINTS,
+                         metavar='PT',
+                         help='how far it reaches past the artwork, in points '
+                              '(default: %(default)s); a button hemmed in by its '
+                              'neighbours gets less')
+    glowing.add_argument('--glow-opacity', type=float, default=glow.GLOW_OPACITY,
+                         metavar='F',
+                         help='how strong it gets at its brightest, 0 to 1 '
+                              '(default: %(default)s)')
+    glowing.add_argument('--glow-color', '--glow-colour', dest='glow_color',
+                         default='white', metavar='COLOUR',
+                         help='what the halo is made of, as a name or #rrggbb '
+                              '(default: %(default)s); a pale shell has nothing '
+                              'for white to stand out against, so try amber')
+    glowing.add_argument('--glow-share', type=int, default=glow.GLOW_SHARE,
+                         metavar='N',
+                         help='how many neighbouring buttons may light together '
+                              '(default: %(default)s, a press lighting only its '
+                              'own button); raising it lets crowded halos reach '
+                              'their full length, at the price of a press '
+                              'lighting the whole cluster')
+    glowing.add_argument('--glow-inputs', default='play', metavar='LIST',
+                         help='which buttons glow: "play" for the controls you '
+                              'watch the game through -- the d-pad, face and '
+                              'shoulder buttons (default) -- "all" for every '
+                              'button including menu and save state, or a '
+                              'comma-separated list of Delta input names')
+    glowing.add_argument('--no-animate', dest='animate', action='store_false',
+                         help='glow only, leaving the buttons themselves still')
+    glowing.add_argument('--tag', default=GLOW_TAG, metavar='TEXT',
+                         help='what to add to the skin\'s name, and in lower case '
+                              'to its identifier (default: %(default)s)')
+
+    options = parser.parse_args(argv)
+    if not options.animate and not options.glow:
+        parser.error('--no-animate leaves nothing to do; add --glow')
+    if not 0 < options.glow_opacity <= 1:
+        parser.error('--glow-opacity must be between 0 and 1')
+    if options.glow_points < glow.MIN_POINTS:
+        parser.error('--glow-points must be at least %g' % glow.MIN_POINTS)
+    if options.glow_share < 1:
+        parser.error('--glow-share must be at least 1, which is a halo on its own')
+    asked = options.glow_inputs.strip()
+    options.glow_inputs = (
+        None if asked.lower() == 'all' else glow.GLOW_INPUTS
+        if asked.lower() == 'play'
+        else frozenset(name.strip() for name in asked.split(',') if name.strip()))
+    if options.glow_inputs is not None and not options.glow_inputs:
+        parser.error('--glow-inputs lists nothing to glow')
+    written = options.glow_color.strip().lower().replace(' ', '')
+    try:
+        options.glow_color = ImageColor.getrgb(
+            GLOW_COLORS.get(written, options.glow_color))[:3]
+    except ValueError as problem:
+        parser.error('--glow-color: %s' % problem)
+    return options
+
+
+def output_name(name, tag=None):
+    """The rebuilt skin's filename, tagged when the build is a variant meant to
+    install alongside the original rather than replace it."""
+    if not tag:
+        return name
+    stem, dot, extension = name.rpartition('.')
+    return ('%s [%s]%s%s' % (stem, tag, dot, extension) if dot
+            else '%s [%s]' % (name, tag))
 
 
 def main(argv=None):
@@ -543,35 +704,55 @@ def main(argv=None):
     output = os.path.abspath(os.path.expanduser(options.output))
     staging = os.path.join(output, '.staging')
     os.makedirs(output, exist_ok=True)
+    tag = options.tag if options.glow else None
 
     skins = collect(options.skins)
     for path in skins:
         # An overlay cut from an already-animated base would be wrong, and the
         # original would be gone, so check before doing any work.
-        if os.path.join(output, os.path.basename(path)) == path:
+        if os.path.join(output, output_name(os.path.basename(path), tag)) == path:
             sys.exit('refusing to overwrite the original: %s\n'
                      'choose an --output directory other than the skin\'s own.' % path)
 
-    total = 0
+    totals = {'animated': 0, 'glowing': 0, 'companions': 0}
     for path in skins:
         name = os.path.basename(path)
         print(name)
         out_dir = os.path.join(staging, name)
         shutil.rmtree(out_dir, ignore_errors=True)
         os.makedirs(out_dir)
-        count = process(Skin(path), out_dir, verbose=not options.quiet)
-        destination = os.path.join(output, name)
+        counts = process(Skin(path), out_dir, verbose=not options.quiet,
+                         animating=options.animate, glowing=options.glow,
+                         points=options.glow_points, opacity=options.glow_opacity,
+                         color=options.glow_color,
+                         tag=options.tag, sharing=options.glow_share,
+                         inputs=options.glow_inputs)
+        destination = os.path.join(output, output_name(name, tag))
         archive(out_dir, destination)
         if not options.keep_staging:
             shutil.rmtree(out_dir, ignore_errors=True)
-        total += count
-        print('  %d animated items -> %s\n' % (count, destination))
+        for field in totals:
+            totals[field] += counts[field]
+        print('  %s -> %s\n' % (summary(counts, options), destination))
 
     if not options.keep_staging:
         shutil.rmtree(staging, ignore_errors=True)
-    print('%d animated items across %d skin%s.'
-          % (total, len(skins), '' if len(skins) == 1 else 's'))
+    print('%s across %d skin%s.'
+          % (summary(totals, options), len(skins), '' if len(skins) == 1 else 's'))
+    if options.glow:
+        print('Renamed with [%s], so Delta installs %s alongside the original '
+              'rather than over it.' % (options.tag, 'them' if len(skins) > 1 else 'it'))
     return 0
+
+
+def summary(counts, options):
+    parts = []
+    if options.animate:
+        parts.append('%d animated items' % counts['animated'])
+    if options.glow:
+        parts.append('%d glowing (%d mask companions)'
+                     % (counts['glowing'], counts['companions']))
+    return ', '.join(parts)
 
 
 if __name__ == '__main__':
