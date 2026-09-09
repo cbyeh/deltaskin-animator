@@ -71,6 +71,11 @@ MIN_ART_FRACTION = 0.35    # of the frame's area, else we only found a detail of
 DPAD_ART_FRACTION = 0.15   # d-pads are mostly gaps: four C buttons, or a thin cross
 OVERLAP_TOLERANCE = 0.3    # of the smaller artwork's area
 
+# What `find_art` records when it found no artwork and animated the touch frame's
+# own shape instead. Such an item has nothing drawn for it in the shell, so it
+# animates but never glows -- see the check in `rebuild_representation`.
+FRAME_SHAPE = 'frame shape'
+
 # How far out to look for a button's artwork, as a multiple of its frame size.
 # Frames are often smaller than the art they sit on (and sometimes off-centre),
 # so this grows until the artwork and its band fit with room to spare.
@@ -96,6 +101,12 @@ BAND_CANDIDATES = {False: (2.25, 3.0, 4.0, 5.5), True: (4.5, 5.5, 7.0, 9.0)}
 # much would show up as a wider band or more damping rather than as a ghost.
 FEATHER_POINTS = {False: 3.0, True: 3.5}
 PRESS_PAD = 32          # px of room around an overlay for a tilt to expand into
+
+# A glowing button's overlay is cut to its artwork and nothing else, so its edge
+# is one the eye sees -- the button against the light around it -- rather than one
+# hidden in flat background. Half a pixel of softening is antialiasing, no more:
+# any wider and the innermost ring of the halo would show through dimmed.
+BARE_FEATHER = 0.5
 
 # What counts as covered. A press may leave a hairline of the artwork uncovered
 # where it runs right up against something else -- the N64's A button is tangent
@@ -211,7 +222,7 @@ def overlay_for(view, walls, interior, pixels, ppp, is_dpad, source):
     }
 
 
-def find_art(base, item, ppp):
+def find_art(base, item, ppp, whole=False):
     """Locate an item's artwork.
 
     Returns a dict with the alpha covering the artwork and its band, where in the
@@ -219,11 +230,38 @@ def find_art(base, item, ppp):
     the search area until the band ends on its own terms rather than being cut off
     by the edge of that area, and relaxes the edge threshold until the artwork is
     a decent fraction of the item's frame. Failing both, falls back to the frame's
-    shape, so the button animates regardless."""
+    shape, so the button animates regardless.
+
+    `whole` asks for the button rather than any convincing part of it; see
+    `reaches_frame`."""
     frame = item['frame']
     is_dpad = kind(item) == 'dPad'
     enough = (DPAD_ART_FRACTION if is_dpad else MIN_ART_FRACTION) * frame['width'] * frame['height']
     best = None
+
+    def reaches_frame(found):
+        """Whether what was found is the button or a detail inside it.
+
+        The search stops at the first edge it can't cross, and the strictest
+        threshold finds that edge wherever the artwork has one of its own: on the
+        N64's portrait shoulders it is the groove around the engraved *L*, so what
+        came back was the 148x68 recess out of a 190x100 button -- which clears
+        `MIN_ART_FRACTION` by itself, and the looser threshold that would have
+        found the whole 184x117 plate was never tried.
+
+        An overlay of the recess is only a slightly smaller animation. A halo
+        grown from it is an outline drawn *inside* the button, hugging the recess
+        with the whole bezel dark outside it, which reads as a mistake rather than
+        as a glow. So an item whose silhouette becomes a halo keeps relaxing until
+        what it found reaches out to its touch frame -- the same test
+        `glow.visible` applies before it trusts that frame to stand in for the
+        button's visible edge."""
+        cap = glow.RIM_SHARE * min(frame['width'], frame['height'])
+        box = found['art']
+        return all(inset <= cap for inset in (
+            box[0] - frame['x'], box[1] - frame['y'],
+            frame['x'] + frame['width'] - box[2],
+            frame['y'] + frame['height'] - box[3]))
 
     for margin in SEARCH_MARGINS:
         view = search_area(base, frame, margin)
@@ -237,7 +275,8 @@ def find_art(base, item, ppp):
                 continue
             if best is None or (found['contained'], found['pixels']) > (best['contained'], best['pixels']):
                 best = found
-            if found['contained'] and pixels >= enough:
+            if found['contained'] and pixels >= enough \
+                    and (not whole or reaches_frame(found)):
                 return found
 
     # Nothing convincing: animate the frame's shape instead.
@@ -245,7 +284,7 @@ def find_art(base, item, ppp):
     walls = wall_map(view['crop'], EDGE_THRESHOLDS[0], view['outside'])
     interior = shape_interior(view['crop'].size, view['frame_box'])
     pixels = sum(1 for value in interior.getdata() if value)
-    shaped = overlay_for(view, walls, interior, pixels, ppp, is_dpad, 'frame shape')
+    shaped = overlay_for(view, walls, interior, pixels, ppp, is_dpad, FRAME_SHAPE)
     if shaped is not None and (best is None or not best['contained']
                                or best['pixels'] < enough):
         return shaped
@@ -306,6 +345,72 @@ def thickness(mask):
         if mask.filter(ImageFilter.MinFilter(2 * radius + 1)).getbbox() is None:
             return radius - 1
     return MAX_GHOST + 1
+
+
+def vacated(alpha, art_mask, offset, box, ppp, is_dpad):
+    """Everywhere a press slides the overlay off, over all press states, in the
+    overlay's own coordinates -- and where that canvas sits in the image.
+
+    The counterpart to `exposure`: the same transform, kept rather than measured.
+    A glowing button's overlay carries no band, so this ring is where the base
+    image's copy of the button would show through, and the halo fills it at full
+    strength instead (`glow.build`). Grown by a pixel, since the overlay's own edge
+    is resampled and lands a shade inside where the transform says.
+
+    A d-pad also gets the ring per press state, under `states`: its glow is handed
+    out an arm at a time, so `glow.build` has to know which arm covers what -- which
+    it works out by zone, being the one that knows where the zones are. A tilt turns
+    out to uncover only the tip of the arm being pushed, which is why this works at
+    all: what a diagonal uncovers falls to the two arms it lights, one piece each."""
+    width, height = box[2] - box[0], box[3] - box[1]
+    canvas = (width + 2 * PRESS_PAD, height + 2 * PRESS_PAD)
+    at = (offset[0] - box[0] + PRESS_PAD, offset[1] - box[1] + PRESS_PAD)
+    origin = (box[0] - PRESS_PAD, box[1] - PRESS_PAD)
+
+    rest = Image.new('L', canvas)
+    rest.paste(alpha, at)
+    art = Image.new('L', canvas)
+    art.paste(art_mask, at)
+    art = ImageChops.multiply(art, rest).point(lambda v: 255 if v >= 250 else 0)
+
+    source = [(PRESS_PAD, PRESS_PAD), (PRESS_PAD + width, PRESS_PAD),
+              (PRESS_PAD + width, PRESS_PAD + height), (PRESS_PAD, PRESS_PAD + height)]
+    centre = (PRESS_PAD + width / 2.0, PRESS_PAD + height / 2.0)
+
+    gaps, states = Image.new('L', canvas), {}
+    for state in press.states(is_dpad):
+        quad = press.quad(width / ppp, height / ppp, state)
+        destination = [(centre[0] + x * ppp, centre[1] + y * ppp) for x, y in quad]
+        coefficients = press.perspective_coefficients(destination, source)
+        pressed = rest.transform(canvas, Image.PERSPECTIVE, coefficients, Image.BILINEAR)
+        covered = pressed.point(lambda v: 255 if v >= 200 else 0)
+        gap = ImageChops.subtract(art, covered).filter(ImageFilter.MaxFilter(3))
+        gaps = ImageChops.lighter(gaps, gap)
+        if is_dpad and state != 'centre':
+            states[state] = gap
+    return {'mask': gaps, 'offset': origin, 'states': states or None}
+
+
+def bare_overlay(mark, centre, ppp, is_dpad):
+    """An overlay cut to the artwork alone, for a button whose halo will cover the
+    edge it leaves behind.
+
+    No band, so nothing of the button's surroundings is carried over the halo and
+    the whole ring shows; and no band means nothing scaling the transform down
+    either, so the button moves the full press depth. The boundary is softened by a
+    fraction of a pixel because it is now an edge the eye sees, between the button
+    and the light around it, rather than one hidden in flat background."""
+    alpha = mark['mask'].filter(ImageFilter.GaussianBlur(BARE_FEATHER))
+    offset = mark['origin']
+    span = alpha.getbbox()
+    box = asset_box(tuple(value + offset[index % 2]
+                          for index, value in enumerate(span)), centre)
+    built = {'alpha': alpha, 'art_mask': mark['mask'], 'offset': offset, 'box': box,
+             'band': 0.0, 'damping': 0, 'lit': True,
+             'exposed': exposure(alpha, mark['mask'], offset, box, ppp, is_dpad)}
+    built['travel'] = travel(built, ppp, is_dpad)
+    built['vacated'] = vacated(alpha, mark['mask'], offset, box, ppp, is_dpad)
+    return built
 
 
 def build_overlay(entry, ppp, is_dpad, centre):
@@ -402,11 +507,14 @@ def asset_box(span, centre):
 
 def process(skin, out_dir, verbose=True, animating=True, glowing=False,
             points=glow.GLOW_POINTS, opacity=glow.GLOW_OPACITY,
-            color=glow.GLOW_COLOR, tag=GLOW_TAG, sharing=glow.GLOW_SHARE,
+            color=None, tag=GLOW_TAG, sharing=glow.GLOW_SHARE,
             inputs=glow.GLOW_INPUTS):
+    """Rebuild one skin into `out_dir`. `color` of `None` picks white or amber
+    per skin, by what the shell under its halos turns out to be."""
     info = json.loads(json.dumps(skin.info))
     total = glows = extras = 0
     fields = {}         # asset filename -> (base image, accumulated glow alpha)
+    shells = []         # how light the skin is under each halo; see suggest_color
 
     for key, rep in representations(info):
         assets = rep['assets']
@@ -424,7 +532,8 @@ def process(skin, out_dir, verbose=True, animating=True, glowing=False,
             if reason:
                 rejected.append((index, item, reason))
                 continue
-            entry = find_art(base, item, ppp)
+            entry = find_art(base, item, ppp,
+                             whole=glowing and glow.worth_glowing(item, inputs))
             if entry is None:
                 rejected.append((index, item, 'no artwork found'))
                 continue
@@ -465,30 +574,117 @@ def process(skin, out_dir, verbose=True, animating=True, glowing=False,
             found.remove(loser)
             rejected.append((loser['index'], loser['item'], reason))
 
-        used, sources, plain = set(), {}, []
+        to_pixels = (base.width / rep['mappingSize']['width'],
+                     base.height / rep['mappingSize']['height'])
+        used, sources, plain, rings = set(), {}, [], {}
+        overlays = {}       # index -> the overlay decided on, written out below
+        summary, notes = None, []
         for entry in sorted(found, key=lambda e: e['index']):
             item = entry['item']
             frame = item['frame']
             centre = (frame['x'] + frame['width'] / 2.0, frame['y'] + frame['height'] / 2.0)
             is_dpad = kind(item) == 'dPad'
-            built = build_overlay(entry, ppp, is_dpad, centre) if animating else None
-            if animating and built is None:
-                rejected.append((entry['index'], item, 'no artwork found'))
-                continue
-
-            if glowing and not glow.worth_glowing(item, inputs):
-                plain.append(label(item))
-            elif glowing:
+            # A halo says "this is the button you pressed", so it needs a button to
+            # say it about. An item that fell back to its frame's shape has no
+            # artwork in the shell at all -- it is a bare touch target, and the N64
+            # skin puts one for `r` down beside the A button, on top of plain shell,
+            # while the R trigger it duplicates sits up at the top edge with the
+            # artwork. Lighting both means one press blooming in two places, the
+            # second of them a square of light over nothing. It still animates.
+            lit = (glowing and glow.worth_glowing(item, inputs)
+                   and entry['source'] != FRAME_SHAPE)
+            mark = None
+            if not lit:
+                if glowing:
+                    plain.append(label(item))
+            else:
                 # The button's own face, not the artwork the overlay moves: that
                 # one takes the surrounding shadow with it, which would start the
                 # halo a dozen pixels out into the shell and cost it that much
                 # reach for nothing. `glow.visible` grows it back out to the
                 # button's edge, which is where the halo belongs.
-                sources[entry['index']] = (largest_regions(entry['interior']),
-                                           (entry['view']['box'][0],
-                                            entry['view']['box'][1]))
+                interior = largest_regions(entry['interior'])
+                at = (entry['view']['box'][0], entry['view']['box'][1])
+                sources[entry['index']] = (interior, at)
+                # The same silhouette the halo will start from, which is what the
+                # overlay is cut to so that none of it lands on the halo. A d-pad
+                # comes along: a tilt only uncovers the tip of the arm being pushed
+                # -- the far side of the cross barely moves -- so the ring left
+                # behind falls inside the one direction whose glow is lit, and that
+                # glow can cover it the same way a button's does.
+                mark = glow.footprint(interior, at,
+                                      glow.scaled(glow.frame_box(item), to_pixels),
+                                      4, is_dpad)
+
+            built = None
+            if animating:
+                built = (bare_overlay(mark, centre, ppp, is_dpad) if mark is not None
+                         else build_overlay(entry, ppp, is_dpad, centre))
+            if animating and built is None:
+                rejected.append((entry['index'], item, 'no artwork found'))
+                sources.pop(entry['index'], None)   # nothing to animate, nothing to light
+                continue
+            if built is not None and 'vacated' in built:
+                rings[entry['index']] = built['vacated']
             if not animating:
                 continue
+            overlays[entry['index']] = (entry, built)
+
+        if glowing and sources:
+            notes = []
+            # A bandless overlay is only safe where the halo really turns up to cover
+            # the edge it leaves behind, and whether it does isn't known until the
+            # halos are packed: a ring is light inside the artwork, and an item whose
+            # artwork lies under a neighbour's mask region has that region's rim
+            # running through it, which is a seam no trimming can fix -- so the halo
+            # is dropped instead. Those items go back to carrying a band, which asks
+            # nothing of the glow, and the packing runs again: without a ring to cut,
+            # such an item usually keeps a halo after all, and if it still doesn't,
+            # the band is what its press needed anyway.
+            while True:
+                notes = []
+                field, companions, halos = glow.build(rep, base.size, sources, points,
+                                                      ppp, notes, sharing, rings)
+                banding = [index for index in sorted(rings)
+                           if index not in halos and index in overlays]
+                if not banding or not animating:
+                    break
+                for index in banding:
+                    entry = overlays[index][0]
+                    frame = entry['item']['frame']
+                    overlays[index] = (entry, build_overlay(
+                        entry, ppp, kind(entry['item']) == 'dPad',
+                        (frame['x'] + frame['width'] / 2.0,
+                         frame['y'] + frame['height'] / 2.0)))
+                    rings.pop(index)
+            # Must be appended only after `build`, which indexes the real items.
+            rep['items'].extend(companions)
+            glows += len(halos)
+            extras += len(companions)
+            shells += [glow.shell_level(base, entry)
+                       for index, entry in sorted(halos.items())
+                       if not glow.directional(rep['items'][index])]
+
+            asset = list(assets.values())[0]
+            if asset in fields and verbose:
+                print('     ! %s is shared with another representation; its glows '
+                      'are merged' % asset)
+            # Every image the representation can draw needs a `_pressed` companion
+            # of its own: DeltaCore looks one up beside whichever asset size it
+            # picked, and finding none just means no glow. In these skins all three
+            # sizes are the same file; where they differ the field is scaled to fit.
+            for name in dict.fromkeys(assets.values()):
+                image = base if name == asset else skin.image(name)
+                alpha = (field if image.size == field.size
+                         else field.resize(image.size, Image.LANCZOS))
+                existing = fields.get(name)
+                fields[name] = (image, ImageChops.lighter(existing[1], alpha)
+                                if existing else alpha)
+
+            summary = (len(halos), len(companions))
+
+        for index, (entry, built) in sorted(overlays.items()):
+            item, frame = entry['item'], entry['item']['frame']
             alpha, offset, box = built['alpha'], built['offset'], built['box']
 
             overlay, _ = padded_crop(base, box)
@@ -511,53 +707,28 @@ def process(skin, out_dir, verbose=True, animating=True, glowing=False,
             if verbose:
                 art = entry['art']
                 moved, fraction = built['travel']
-                notes = ['%s' % entry['source'], 'band %.2fpt' % built['band']]
+                extras_note = ['%s' % entry['source'],
+                               'no band, the halo covers the edge' if built.get('lit')
+                               else 'band %.2fpt' % built['band']]
                 if built['damping']:
-                    notes.append('damped %.0f%%' % (100 * built['damping']))
-                if not covered(built['exposed']):
-                    notes.append('EXPOSES %.1f%% of artwork, %dpx thick'
-                                 % (100 * built['exposed'][0], 2 * built['exposed'][1] + 1))
+                    extras_note.append('damped %.0f%%' % (100 * built['damping']))
+                if not built.get('lit') and not covered(built['exposed']):
+                    extras_note.append('EXPOSES %.1f%% of artwork, %dpx thick'
+                                       % (100 * built['exposed'][0],
+                                          2 * built['exposed'][1] + 1))
                 print('     + %-18s frame %dx%d  art %dx%d  asset %dx%d  '
                       'moves %.2fpt (%.0f%%)  [%s]'
                       % (label(item), frame['width'], frame['height'],
                          art[2] - art[0], art[3] - art[1],
                          box[2] - box[0], box[3] - box[1], moved, 100 * fraction,
-                         ', '.join(notes)))
+                         ', '.join(extras_note)))
         if verbose:
             for index, item, reason in sorted(rejected, key=lambda entry: entry[0]):
                 print('     - %-18s %s' % (label(item), reason))
-
-        if glowing and sources:
-            notes = []
-            field, companions, halos = glow.build(rep, base.size, sources, points,
-                                                  ppp, notes, sharing)
-            # Must be appended only after `build`, which indexes the real items.
-            rep['items'].extend(companions)
-            glows += len(halos)
-            extras += len(companions)
-
-            asset = list(assets.values())[0]
-            if asset in fields and verbose:
-                print('     ! %s is shared with another representation; its glows '
-                      'are merged' % asset)
-            # Every image the representation can draw needs a `_pressed` companion
-            # of its own: DeltaCore looks one up beside whichever asset size it
-            # picked, and finding none just means no glow. In these skins all three
-            # sizes are the same file; where they differ the field is scaled to fit.
-            for name in dict.fromkeys(assets.values()):
-                image = base if name == asset else skin.image(name)
-                alpha = (field if image.size == field.size
-                         else field.resize(image.size, Image.LANCZOS))
-                existing = fields.get(name)
-                fields[name] = (image, ImageChops.lighter(existing[1], alpha)
-                                if existing else alpha)
-
-            if verbose:
-                print('     %sglow %.1fpt around %d items, %d mask companions%s'
-                      % ('' if tuple(color) == (255, 255, 255)
-                         else '#%02x%02x%02x ' % tuple(color),
-                         points, len(halos), len(companions),
-                         '  (no glow: %s)' % ', '.join(plain) if plain else ''))
+            if summary is not None:
+                print('     glow %.1fpt around %d items, %d mask companions%s'
+                      % ((points,) + summary +
+                         ('  (no glow: %s)' % ', '.join(plain) if plain else '',)))
                 for note in notes:
                     index, text = note.split(': ', 1)
                     print('     ~ %-18s %s' % (label(rep['items'][int(index)]), text))
@@ -566,6 +737,18 @@ def process(skin, out_dir, verbose=True, animating=True, glowing=False,
         if name != 'info.json':
             with open(os.path.join(out_dir, os.path.basename(name)), 'wb') as file:
                 file.write(skin.read(name))
+    # One colour for the whole skin, decided from the shell it will be laid over
+    # unless it was asked for: a skin carries one `glow` record and shows one name,
+    # and Delta picks whichever asset size fits, so two representations of the same
+    # skin glowing different colours would be the same skin lighting differently in
+    # portrait and landscape.
+    if color is None:
+        color = glow.suggest_color(shells)
+        if verbose and fields:
+            print('  glow #%02x%02x%02x -- %s' % (
+                tuple(color) + ('white, which the shell is dark enough to show'
+                                if tuple(color) == glow.GLOW_COLOR
+                                else 'the shell is too pale for white',)))
     for asset, (base, field) in fields.items():
         glow.apply(base, field, opacity, color).save(
             os.path.join(out_dir, os.path.basename(glow.pressed_name(asset))),
@@ -641,10 +824,11 @@ def parse(argv):
                          help='how strong it gets at its brightest, 0 to 1 '
                               '(default: %(default)s)')
     glowing.add_argument('--glow-color', '--glow-colour', dest='glow_color',
-                         default='white', metavar='COLOUR',
+                         default='auto', metavar='COLOUR',
                          help='what the halo is made of, as a name or #rrggbb '
-                              '(default: %(default)s); a pale shell has nothing '
-                              'for white to stand out against, so try amber')
+                              '(default: %(default)s, which is white on any shell '
+                              'dark enough to show it and amber on one too pale '
+                              'for white to stand out against)')
     glowing.add_argument('--glow-share', type=int, default=glow.GLOW_SHARE,
                          metavar='N',
                          help='how many neighbouring buttons may light together '
@@ -681,11 +865,14 @@ def parse(argv):
     if options.glow_inputs is not None and not options.glow_inputs:
         parser.error('--glow-inputs lists nothing to glow')
     written = options.glow_color.strip().lower().replace(' ', '')
-    try:
-        options.glow_color = ImageColor.getrgb(
-            GLOW_COLORS.get(written, options.glow_color))[:3]
-    except ValueError as problem:
-        parser.error('--glow-color: %s' % problem)
+    if written == 'auto':
+        options.glow_color = None       # decided per skin; see `glow.suggest_color`
+    else:
+        try:
+            options.glow_color = ImageColor.getrgb(
+                GLOW_COLORS.get(written, options.glow_color))[:3]
+        except ValueError as problem:
+            parser.error('--glow-color: %s' % problem)
     return options
 
 

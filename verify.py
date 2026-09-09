@@ -28,15 +28,17 @@ import os
 import re
 import sys
 
-from PIL import Image, ImageChops, ImageColor, ImageDraw
+from PIL import Image, ImageChops, ImageColor, ImageDraw, ImageFilter
 
 import glow
 import press
-from animate import collect
+from animate import MAX_GHOST, collect, find_art, thickness
 from skinlib import Skin, kind, label, pixels_per_point, representations
 
 CLOSE_UP_MARGIN = 0.45   # of the item's size, added around a close-up
 CLOSE_UP_SCALE = 1.4     # close-ups are rendered a little larger than life
+OPAQUE_SLACK = 2         # per channel, how far off the glow colour still counts as it
+FRAME_SLACK = 2          # px a button's artwork may reach past its own frame
 
 
 def base_image(skin, rep):
@@ -208,6 +210,116 @@ def check_glow(skin, name, failures):
             failures.append('%s %s: pressing %s lights %s at %d/255 -- a halo that '
                             'is not under the finger'
                             % (name, '/'.join(key), pressing, peer, found))
+
+
+def check_ghosts(skin, name, failures):
+    """Pressed, no overlay uncovers the button it left behind.
+
+    An overlay is drawn over the base image, and the base image still has the
+    button painted where it was, so a shrinking overlay uncovers that edge unless
+    something covers it. Two things can: a band of surrounding background carried
+    along by the overlay, or -- on a glowing button, whose overlay carries no band
+    at all so that nothing of it lands on the halo -- the halo itself, at full
+    strength, in the ring the press vacates.
+
+    Both come to the same picture on screen, so both are measured here rather than
+    in the build: for every press state, whatever the moved overlay no longer covers
+    has to be covered by opaque glow instead. The build's own measurement was of the
+    overlay alone, which is exactly the blind spot that let a band of background sit
+    on top of a halo through several releases.
+
+    Only what the press uncovers *of the button itself* counts: a band is background,
+    so its own rim sliding inward uncovers background that looks the same either way.
+    So the artwork is located again, by the same detection the build ran over the same
+    base image, and the gap is measured inside that."""
+    for key, rep in representations(skin.info):
+        base = base_image(skin, rep)
+        ppp = pixels_per_point(key, base)
+        scale = (base.width / float(rep['mappingSize']['width']),
+                 base.height / float(rep['mappingSize']['height']))
+        assets = list(dict.fromkeys(rep['assets'].values()))
+        name_pressed = glow.pressed_name(assets[0])
+        lit = None
+        if name_pressed in set(skin.names()):
+            lit = opaque(base, skin.image(name_pressed), glow_color(skin.info))
+        worst = (0, None)
+        for item in animated(rep):
+            overlay = skin.image(item['asset']['name'])
+            box = overlay_box(item, rep, base.size)
+            if overlay.size != (box[2] - box[0], box[3] - box[1]):
+                continue                        # check_rest reports that already
+            rest = ImageChops.multiply(
+                overlay.split()[3].point(lambda v: 255 if v >= 200 else 0),
+                artwork(base, item, ppp, box, overlay.size, scale))
+            covered = None
+            for direction in press.states(kind(item) == 'dPad'):
+                moved, shift = pressed(overlay, ppp, direction)
+                state = Image.new('L', overlay.size)
+                state.paste(moved.split()[3], (shift[0], shift[1]))
+                state = state.filter(ImageFilter.MaxFilter(3)).point(
+                    lambda v: 255 if v >= 200 else 0)
+                covered = state if covered is None else ImageChops.darker(covered, state)
+            gap = ImageChops.subtract(rest, covered)
+            if lit is not None:
+                patch = Image.new('L', overlay.size)
+                inner = intersect(box, (0, 0, base.width, base.height))
+                if inner is not None:
+                    patch.paste(lit.crop(inner), (inner[0] - box[0], inner[1] - box[1]))
+                gap = ImageChops.subtract(gap, patch)
+            found = thickness(gap)
+            if found > worst[0]:
+                worst = (found, label(item))
+        print('    %-30s worst uncovered edge %dpx' % ('/'.join(key), 2 * worst[0] + 1))
+        if worst[0] > MAX_GHOST:
+            failures.append('%s %s: pressing %s uncovers %dpx of the button drawn '
+                            'in the base image -- a ghosted edge'
+                            % (name, '/'.join(key), worst[1], 2 * worst[0] + 1))
+
+
+def artwork(base, item, ppp, box, size, scale):
+    """Where the button itself is painted, in the overlay's own coordinates.
+
+    Located the way the build located it, off the same base image -- check_metadata
+    holds that image unchanged, so the answer is the one the band was measured
+    against. If detection comes up empty, the item's frame stands in, grown a little
+    for artwork that reaches past it."""
+    stencil = Image.new('L', size, 0)
+    entry = find_art(base, item, ppp)
+    if entry is not None:
+        art, at = entry['interior'], entry['view']['box']
+        stencil.paste(art.point(lambda v: 255 if v else 0),
+                      (at[0] - box[0], at[1] - box[1]))
+        return stencil
+    frame = glow.scaled(glow.frame_box(item), scale)
+    ImageDraw.Draw(stencil).rectangle(
+        (frame[0] - box[0] - FRAME_SLACK, frame[1] - box[1] - FRAME_SLACK,
+         frame[2] - box[0] + FRAME_SLACK - 1, frame[3] - box[1] + FRAME_SLACK - 1),
+        fill=255)
+    return stencil
+
+
+def opaque(base, pressed, color):
+    """Where the pressed image has replaced the base outright with the glow colour.
+
+    A halo at full strength is the colour and nothing of what it lies over, which is
+    what lets it stand in for a band: whatever was painted underneath -- the button's
+    own edge included -- is gone. Anything short of full strength still shows some of
+    it, so nothing short of full strength counts here."""
+    stencil = None
+    for channel in range(3):
+        band = ImageChops.difference(
+            pressed.convert('RGB').split()[channel],
+            Image.new('L', pressed.size, color[channel])).point(
+                lambda v: 255 if v <= OPAQUE_SLACK else 0)
+        stencil = band if stencil is None else ImageChops.multiply(stencil, band)
+    return ImageChops.multiply(stencil, ImageChops.difference(
+        base.convert('RGB'), pressed.convert('RGB')).convert('L').point(
+            lambda v: 255 if v > 1 else 0))
+
+
+def intersect(a, b):
+    box = (max(a[0], b[0]), max(a[1], b[1]), min(a[2], b[2]), min(a[3], b[3]))
+    return box if box[2] > box[0] and box[3] > box[1] else None
 
 
 def visible(image):
@@ -449,6 +561,7 @@ def main(argv=None):
             failures.append('%s: no matching original in %s' % (name, options.original))
         check_rest(rebuilt, name, failures)
         check_glow(rebuilt, name, failures)
+        check_ghosts(rebuilt, name, failures)
 
         for key, rep in representations(rebuilt.info):
             base = base_image(rebuilt, rep)
@@ -478,7 +591,8 @@ def main(argv=None):
             print('  ' + failure)
         return 1
     print('Every rest state reproduces its base image exactly, no glow shows an '
-          'edge, a press lights nothing but the button under it%s.'
+          'edge, no press leaves the button it moved off behind, a press lights '
+          'nothing but the button under it%s.'
           % (', and every touch target is where it was'
              if options.original else ''))
     return 0

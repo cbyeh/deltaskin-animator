@@ -73,12 +73,14 @@ they happen to lie over. An N64's C-pad is one 395-unit square with five other
 buttons packed against its corners.
 
 Where a halo isn't round, its companion is two overlapping rectangles rather than
-one (`plus`), with a square taken out of each corner of the box. The halo is round
-where its box is not, so those corners hold no glow while reaching furthest towards
-a diagonal neighbour -- and what a companion reaches over is exactly what its
-neighbours lose. The cut is the deepest that leaves both the corner squares
-themselves and the union's boundary dark. Because the two pieces overlap, the lines
-where they meet lie inside the union and are never measured as an edge.
+one (`notched`), which leaves out the corners where two insets meet. The four insets
+are independent, and a one-sided halo needs them to be: a corner comes off only where
+the glow has left it empty, which is where the halo has bloomed on one side and not
+on the neighbouring one -- and what a companion reaches over is exactly what its
+neighbours lose. Each cut is the deepest that leaves both the corner itself and the
+union's boundary dark, and the smaller of the disc and the notched box wins by area.
+Because the two pieces overlap, the lines where they meet lie inside the union and
+are never measured as an edge.
 
 What is left is a packing problem, and one thing decides its shape: a press must
 light the button under your thumb and nothing else. The pressed image holds every
@@ -138,11 +140,11 @@ cluster. What it may do instead is pick the reach that survives the clipping bes
 the fade is a fraction of the reach, so past a point asking for more glow leaves
 less of it standing.
 
-What such a fade can spoil is the button's own face, since the rectangle it is
-dodging may cross the artwork itself; a dimmed patch on a button you are holding
-reads as the button lighting unevenly, which is worse than a glow that doesn't
-reach. So a halo in that position keeps to a rim and drops the wash over its face,
-unless the clipping has taken so much of the rim that the wash is all it has.
+None of it touches the button's own face. The halo is a ring outside the artwork
+and the artwork is left exactly as it was drawn, which is what makes a fade safe to
+do at all: the rectangle a halo is dodging often crosses the button itself, and a
+wash dimmed across a button you are holding reads as the button lighting unevenly
+rather than as a light beside it.
 
 Trimming is still there for what clipping can't fix (a keep-out too narrow to
 fade inside), and a halo that would leave a seam even then is dropped. `build`
@@ -175,10 +177,57 @@ GLOW_INPUTS = frozenset({'up', 'down', 'left', 'right',
                          'a', 'b', 'x', 'y', 'z',
                          'l', 'r', 'l2', 'r2', 'l3', 'r3',
                          'cUp', 'cDown', 'cLeft', 'cRight'})
+
+# The shoulders take a thin outline instead of a bloom, however much room they have.
+# They sit along the top edge with the whole corner of the shell to themselves, so
+# the packing hands them the most reach on the skin -- 28.7pt on the DS against 7.3pt
+# for a face button -- and the result is a lopsided one: a wide soft bloom on the
+# open side, and on the side something is in the way, the fade cut off inside its own
+# bright core, which is a hard bright line with a straight edge. The N64's landscape
+# `l` and `r` had 48px of bloom above and 10px below ending at full strength. A thin
+# ring is even on every side without asking anything of the room, which is what these
+# buttons want: they are long, they are already at the edge of the picture, and an
+# outline round one reads as clearly as a bloom.
+SHOULDER_INPUTS = frozenset({'l', 'r', 'l2', 'r2', 'l3', 'r3'})
+SHOULDER_POINTS = 4.0
+
 GLOW_COLOR = (255, 255, 255)   # what the glow is made of; white unless asked
+
+# A shell too pale for white to be seen against gets this instead; see
+# `suggest_color`, which is what `--glow-color auto` asks for. Warm, because a
+# lit button is a light and a light is warm, and the amber the original
+# reference shot used reads as a glow on a grey plate where white reads as paint.
+GLOW_WARM = (255, 179, 0)
+# Base luminance under a halo above which white stops reading as light. Set from the
+# skins themselves, whose palest halo sits on 142 (the SNES shell), 130 (the NES's
+# silver button plate), 120 (the N64's A/B plate), then 71, 43, 37, 36 -- so anything
+# between about 75 and 120 divides them the way the eye does. Middling grey is the
+# hard case: white on it is neither light nor paint, and 115 calls it pale.
+PALE_LEVEL = 115
+
 GLOW_OPACITY = 1.0       # the colour at its strongest, just outside the artwork
-FACE_FRACTION = 0.7      # ... and over the button's own face, relative to that
+
+# How much of a wash the button's own face gets, relative to that. None: the
+# halo is a ring *outside* the artwork and the button is left exactly as it was
+# drawn. White over the face lifts the whole button towards white -- the SNES's
+# A went pale lavender, the DS's a pale grey -- which is a button that has lost
+# its colour rather than a button with a light around it, and it hides the very
+# artwork whose sinking is the other half of the feedback. Kept as a knob because
+# the profile below is written in terms of it.
+FACE_FRACTION = 0.0
 FALLOFF = 0.85           # fade exponent: 1 is linear, lower stays bright further out
+
+# Of the reach held at full strength before the fade begins, and of the reach that
+# core then takes to rejoin the fade. A ring outside the artwork is all the glow
+# there is now, and how *wide* it can be is decided by the buttons next door -- a
+# face button in a diamond gets 10 points and no argument. What is left to decide
+# is how much of that width is solid, and the answer is most of it: a band of flat
+# white with a short fade off the end reads as a ring, where a gradient over the
+# same distance reads as a smudge. The fade is what every neighbour is measured
+# against, so the core drops steeply back onto it and the last levels are left
+# exactly where they were.
+GLOW_CORE = 0.55
+GLOW_EDGE = 0.2
 CROSS_REACH = 1.6        # a d-pad's reach, relative: it only glows outside itself
 CROSS_FADE = 0.9         # of that reach spent narrowing each arm to nothing
 CROSS_SEAM = 3           # px an arm reaches back into the frame, to bury the join
@@ -206,6 +255,18 @@ EDGE_TOLERANCE = 6
 # clipping took all of it, and what is left isn't worth a companion.
 EMPTY_SHARE = 0.02
 
+# And the floor for a single arm of a d-pad, which needs a much higher one. Its
+# glow is one
+# arm at a time, so the little that survives a heavy clip isn't a thin ring round
+# the button -- it is whichever piece of the strip happened to fall outside every
+# neighbour's frame, which can be a patch of bezel nowhere near what is being
+# pressed. The N64's C buttons are the case: their pad is one item covering the
+# whole cluster, glow inside it would light all four at once, and what is left
+# outside is a bright bar floating above the top button. A press that lights
+# nothing reads as a skin without glow on that button; a press that lights a
+# stray patch reads as a bug.
+CROSS_EMPTY = 0.25
+
 # A lopsided halo gets an even ring underneath, out to whatever does
 # fit, so the light is unbroken where it is brightest -- at the button's own edge
 # -- and only the bloom past it is one-sided. Rings shorter than this are too thin
@@ -218,22 +279,59 @@ RING_POINTS = 1.25
 # business starting out there.
 RIM_SHARE = 0.15
 
-# When a clipped halo does without the wash over the button's own face. It keeps
-# the wash while at least `FACE_KEEP` of the washed halo survives the clipping --
-# the bite is off in a corner and nobody will see it -- and gives it up below that,
-# but only while at least `FACE_DROP` of the rim is left to carry the press on its
-# own. Where the clipping takes the rim as well, the wash is all the button has,
-# and a patchy lit face beats a press with nothing to show for it.
-FACE_KEEP = 0.8
-FACE_DROP = 0.5
-
 # Reaches to try, as fractions of the one asked for, when something is in the way.
 TRIMS = (1.0, 0.85, 0.72, 0.6, 0.5, 0.42, 0.34, 0.28, 0.23, 0.18)
 
 ROUNDS = 4               # relaxation passes; one halo shrinking can free another
 
+# When a d-pad's four arms are levelled to the shortest of them (`evened`): only if
+# the longest is at least `LEVEL_RATIO` times the shortest, so a cross whose arms
+# differ by a few pixels keeps every one of them, and only if the shortest is still
+# `LEVEL_FLOOR` points long, so three good arms are never cut back to a stub.
+LEVEL_RATIO = 2.0
+LEVEL_FLOOR = 10.0
+
+# A halo that blooms further one way than another needs a mask shaped like the bloom,
+# and a rectangle or a disc holding a lobe holds a lot of skin that the lobe doesn't
+# reach -- skin that may be a neighbour's glow, which is what caps the bloom in the
+# first place. `staircase` cuts the box into this many overlapping bands instead, each
+# pulled in to the glow its own rows really carry. Bands overlap by `STAIR_SEAM`, so
+# that where two of them meet each buries the other's rim (see `boundary`); and a
+# staircase is only taken where it saves at least this much of the simpler shape,
+# since every band is another item in the skin.
+STAIR_CUTS = (2, 3, 4)
+STAIR_SEAM = 3
+STAIR_GAIN = 0.92
+
+# A round halo blooming one way is carried by a disc over its even ring and a
+# staircase over the bloom past it (`carried`). These are the fractions of the reach
+# the disc is tried at, measured from the artwork out: too large and it is the bulging
+# disc again, too small and its rim comes out through the middle of the light. And
+# `LOBE_FULL` is how much of its own disc a halo has to have gone dark in before the
+# split is worth looking for at all -- an even halo is a disc and wants a disc.
+LOBE_SHARES = (0.85, 0.72, 0.6, 0.5)
+LOBE_FULL = 0.92
+
+# How many pixels in from the halo's own edge a disc is allowed to be tried. A halo
+# ends in a blur whose last pixels are worth a level or two out of 255, and a disc
+# sized to hold every one of them carries that dead tail all the way round its rim --
+# which on a diamond of buttons is the whole of what puts it back over its neighbours.
+# Every rung is offered as a shape of its own and answers to the same test as the
+# rest: a disc that cuts light the eye can see is thrown out (`fits`), so the ladder
+# reaches only as far in as the tail is dark, and the smallest one that holds wins.
+DISC_TRIMS = 10
+
 ROUND = 'circle'         # DeltaCore's name for a disc-shaped mask
 ROUND_SLACK = 2          # px a disc may miss the shape it is standing in for
+
+# How far past the artwork a companion must reach on an item whose halo fills the
+# ring its press vacates (`wearing`). Two pixels: one to bury the frame's own rim,
+# one for the rounding between a frame in mapping units and the pixels it lands on.
+INSIDE_SLACK = 2
+
+# How close to the edge of the display an item's artwork counts as sitting on it,
+# which decides whether its halo fades before that edge or runs off it (`lines`).
+FLUSH_SLACK = 3
 
 
 def shifted(mask, dx, dy):
@@ -311,8 +409,8 @@ def halo(art, reach, face=FACE_FRACTION, dist=None):
 
     Rings of decreasing strength one step apart, then a blur, which smooths the
     step between one ring and the next. The brightest point is the artwork's own
-    edge; the face gets a gentler lift so the button reads as lit rather than
-    washed out.
+    edge, and by default the artwork itself is left alone: what the eye is being
+    shown is a ring of light around the button, not a button painted white.
 
     The fade is slightly concave (`FALLOFF` below 1) because how far a halo may
     reach is set by its neighbours, not by how bright it is: a reach is a fixed
@@ -320,8 +418,10 @@ def halo(art, reach, face=FACE_FRACTION, dist=None):
     through has spent the second half of that budget on nothing. Staying bright
     almost to the end and then dropping is what a crowded cluster can afford.
 
-    `face` is that lift, and a d-pad passes 0: its arrows and the tilt it does
-    when pressed are the feedback, and white over them erases both.
+    `face` is a wash over the artwork itself, which is `FACE_FRACTION` -- none --
+    everywhere: a d-pad because its arrows and its tilt are the feedback and white
+    over them erases both, and a button because a ring reads as light and a pale
+    button reads as the wrong colour.
 
     `dist` is a `depths` field already built for this silhouette, of at least this many
     rings; without one it is built here."""
@@ -330,8 +430,29 @@ def halo(art, reach, face=FACE_FRACTION, dist=None):
     if dist is None:
         dist = depths(art, rings)
 
-    alpha = dist.point([0] + [round(255 * (1.0 - (step - 0.5) / rings) ** FALLOFF)
-                              if step <= rings else 0 for step in range(1, 256)])
+    # A core of full strength before the fade starts. What a halo is laid over is
+    # never one flat colour -- a button sits in a dish, with its own shadow on one
+    # side of it and bare shell on the other -- and a colour laid on at half alpha
+    # takes half of whatever is underneath with it. A ring that spends most of its
+    # width at those middling strengths therefore comes out bright where the shell
+    # is pale and dull where the shadow is, which reads as a lopsided glow even when
+    # the glow itself is a perfect circle. Opaque out to `GLOW_CORE` of the way,
+    # the band the eye actually follows is the same white all the way round, and
+    # only the fade past it picks up what it lies on.
+    #
+    # Laid over the fade rather than replacing it, and dropping steeply enough to
+    # rejoin it well before the end: what a halo may reach is decided entirely by
+    # its last few levels -- the tolerance every rectangle in this arrangement is
+    # measured against is 6 out of 255 -- so a core that brightened the tail as well
+    # would buy its even ring with a shorter one. It cost the N64's B its glow
+    # outright before the two curves were separated.
+    def level(step):
+        outer = (step - 0.5) / rings
+        core = max(0.0, 1.0 - max(0.0, outer - GLOW_CORE) / GLOW_EDGE)
+        return round(255 * max(1.0 - outer, core) ** FALLOFF)
+
+    alpha = dist.point([0] + [level(step) if step <= rings else 0
+                              for step in range(1, 256)])
     if face:
         alpha.paste(round(255 * face), (0, 0), art)
     return alpha.filter(ImageFilter.GaussianBlur(sigma))
@@ -381,6 +502,48 @@ def visible(mask, box, frame, cap):
         circle = ((frame[0] + frame[2] - 1) / 2.0, (frame[1] + frame[3] - 1) / 2.0,
                   (min(wide, high) - 1) / 2.0)
     return grown, circle
+
+
+def footprint(art, offset, frame, pad, cross=False):
+    """The silhouette a halo grows from, on a canvas with room for the halo.
+
+    A halo reaches further out than the crop its artwork was found in has room
+    for, so each silhouette moves onto a canvas of its own -- which also keeps the
+    ring dilations off all the empty space around it. A d-pad keeps the silhouette
+    it was found with: its frame is a square around a cross, and filling that
+    square would put solid glow in the corners, where the shape of the thing being
+    pressed is.
+
+    Returns the mask, where its top-left corner sits in image pixels, the box its
+    artwork occupies, and the circle it was grown to if it was grown to one --
+    `None` where `art` is empty.
+
+    This is also the boundary the item's *overlay* is cut to (`animate.py`), which
+    is why it lives out here rather than inside `build`. The two have to be the
+    same shape to the pixel: the overlay is drawn on top of the halo, so any of the
+    button's surroundings it carries is halo the device never shows."""
+    span = art.getbbox()
+    if span is None:
+        return None
+    box = (offset[0] + span[0], offset[1] + span[1],
+           offset[0] + span[2], offset[1] + span[3])
+    want = box if cross else union(box, frame)
+    origin = (want[0] - pad, want[1] - pad)
+    canvas = Image.new('L', (want[2] - want[0] + 2 * pad, want[3] - want[1] + 2 * pad))
+    canvas.paste(art.crop(span), (box[0] - origin[0], box[1] - origin[1]))
+    circle = None
+    if want != box:
+        def local(rect):
+            return (rect[0] - origin[0], rect[1] - origin[1],
+                    rect[2] - origin[0], rect[3] - origin[1])
+        canvas, circle = visible(canvas, local(box), local(frame),
+                                 round(RIM_SHARE * min(frame[2] - frame[0],
+                                                       frame[3] - frame[1])))
+        span = canvas.getbbox()
+        box = (origin[0] + span[0], origin[1] + span[1],
+               origin[0] + span[2], origin[1] + span[3])
+    return {'mask': canvas, 'origin': origin, 'box': box,
+            'circle': None if cross else circle}
 
 
 def solid(size, box, offset):
@@ -436,6 +599,21 @@ def profile(length, start, stop, fade):
     return levels
 
 
+def reaching(length, edge, away, cap, fade):
+    """A 0-255 weight along one axis: full at `edge` and for `cap - fade` past it in
+    the `away` direction, then a ramp to nothing by `cap`.
+
+    One-sided, unlike `profile`: an arm cut back to length keeps all of its base --
+    the brightest part, right against the artwork -- and loses only its tip."""
+    fade = max(1, int(round(min(fade, cap))))
+    levels = []
+    for position in range(length):
+        far = (position - edge) * away
+        levels.append(255 if far <= cap - fade else
+                      0 if far >= cap else round(255 * (cap - far) / fade))
+    return levels
+
+
 def mouth(art, frame, side):
     """Where an arm reaches the edge of `frame` on one side, as the span it covers
     along that edge and how far short of the edge the artwork stops.
@@ -467,7 +645,7 @@ def mouth(art, frame, side):
             min(frame[outer + 2], strip[outer] + found[outer + 2]), inset)
 
 
-def arms(alpha, frame, fade, mouths):
+def arms(alpha, frame, fade, mouths, caps=None):
     """`alpha` confined to the four arms reaching straight out of `frame`, each
     spreading sideways as it goes and narrowing to nothing over `fade` at the edges.
 
@@ -490,7 +668,14 @@ def arms(alpha, frame, fade, mouths):
     that gap, so the line itself stays dark: what the eye then sees is the glow
     sitting off the button's own rim, a little way inside the frame, rather than a
     bright edge with a straight side. The d-pad dishes are inset a good 13px; a cross
-    whose arms reach past its frame has no gap and needs no fade."""
+    whose arms reach past its frame has no gap and needs no fade.
+
+    `caps` optionally holds a length in pixels per side, past which that arm ramps
+    away to nothing (`reaching`). One arm can have far less room than the other
+    three -- the N64's up arm has the thumbstick 49px above it -- and four arms of
+    obviously different lengths read as a mistake, so the rest can be cut back to
+    match it. Only the tips go: the length is measured out from the frame's edge and
+    the ramp is one-sided, leaving the bright base against the artwork untouched."""
     weight = Image.new('L', alpha.size, 0)
     width, height = alpha.size
     for side, (near, far, inset) in mouths.items():
@@ -512,11 +697,17 @@ def arms(alpha, frame, fade, mouths):
             draw.polygon(points if outer == 0
                          else [(y, x) for x, y in points], fill=level)
         span = (0, edge) if away < 0 else (edge, height if outer == 0 else width)
+        length = height if outer == 0 else width
         rise = Image.new('L', (1, height) if outer == 0 else (width, 1))
-        rise.putdata(profile(height if outer == 0 else width,
-                             span[0], span[1], inset))
-        weight = ImageChops.lighter(weight, ImageChops.multiply(
-            arm, rise.resize(alpha.size, Image.NEAREST)))
+        rise.putdata(profile(length, span[0], span[1], inset))
+        arm = ImageChops.multiply(arm, rise.resize(alpha.size, Image.NEAREST))
+        cap = (caps or {}).get(side)
+        if cap is not None:
+            tip = Image.new('L', (1, height) if outer == 0 else (width, 1))
+            tip.putdata(reaching(length, edge, away, cap,
+                                 min(fade, max(2, cap / 3.0))))
+            arm = ImageChops.multiply(arm, tip.resize(alpha.size, Image.NEAREST))
+        weight = ImageChops.lighter(weight, arm)
     return ImageChops.multiply(alpha, weight)
 
 
@@ -540,17 +731,139 @@ def along(alpha, offset, boxes):
                                         ).getextrema()[1] for box in boxes])
 
 
-def plus(box, cut):
-    """`box` with a square `cut` taken out of each corner, as two overlapping
-    rectangles.
+def notched(box, insets):
+    """`box` as two overlapping rectangles -- one inset `top` and `bottom`, one inset
+    `left` and `right` -- which leaves out the corners where two insets meet.
 
     A halo is round and its box is not, so the corners of the box hold nothing --
     and they are what reaches furthest towards a button sitting diagonally away,
     where its own artwork can end up inside them. Handing the mask two rectangles
     instead of one keeps the same glow and gives the diagonal neighbour its room
-    back. They overlap, so the lines where they meet lie inside the union."""
-    return [(box[0], box[1] + cut, box[2], box[3] - cut),
-            (box[0] + cut, box[1], box[2] - cut, box[3])]
+    back. They overlap, so the lines where they meet lie inside the union.
+
+    The four insets are independent, which is what a one-sided halo needs. A glow
+    that blooms up and to the right and dies out before the button below it has one
+    corner worth keeping and three worth cutting deep, and cutting all four to the
+    depth the brightest of them allows is barely cutting them at all. A corner is
+    left out exactly where both of its insets reach it, so `top` and `left` alone
+    take out the top-left corner and nothing else."""
+    top, bottom, left, right = insets
+    return [(box[0], box[1] + top, box[2], box[3] - bottom),
+            (box[0] + left, box[1], box[2] - right, box[3])]
+
+
+def staircase(alpha, offset, box, keep, cuts, axis, seam=STAIR_SEAM):
+    """`box` as a stack of `cuts` rectangles across `axis`, each pulled in across to
+    the glow its own rows hold -- the shape of the glow rather than the shape of its
+    bounding box.
+
+    This is what lets a halo be longer on one side than the other. A bloom is capped
+    not by where its own light reaches but by what the rectangle carrying it covers:
+    a disc or a box big enough to hold a lobe reaching up also reaches down, and if
+    a neighbour's glow is down there, pressing this button lights it. Cut into bands,
+    the mask follows the lobe up and stays off the neighbour, and the halo gets to
+    keep the room it actually has.
+
+    Two details make it safe. The bands overlap, because `boundary` erases a sibling
+    a pixel shy of its own rim: butted together, the rim where two bands meet would
+    count as an edge on show though the mask has no seam there at all. And every band
+    holds the frame's own slice as well as the glow's, since the frame is live
+    alongside the companion whenever the item itself is pressed and a rim sticking
+    out through the side of the staircase is an edge like any other.
+
+    Returns `None` where `box` is too short across to be worth cutting."""
+    across = 1 - axis
+    low, high = box[axis], box[axis + 2]
+    if high - low < cuts * (2 * seam + 2):
+        return None
+    lit = alpha.point(lambda level: 255 if level > EDGE_TOLERANCE else 0)
+    edges = [low + int(round((high - low) * step / float(cuts)))
+             for step in range(cuts + 1)]
+    pieces = []
+    for step in range(cuts):
+        start = max(low, edges[step] - (seam if step else 0))
+        stop = min(high, edges[step + 1] + (seam if step < cuts - 1 else 0))
+        band = [0, 0, alpha.width, alpha.height]
+        band[axis], band[axis + 2] = start - offset[axis], stop - offset[axis]
+        found = lit.crop(tuple(band)).getbbox()
+        if found is None:
+            continue
+        edge = [band[axis] + offset[axis], band[axis + 2] + offset[axis]]
+        side = [found[across] + band[across] + offset[across] - 1,
+                found[across + 2] + band[across] + offset[across] + 1]
+        if keep is not None and keep[axis] < stop and keep[axis + 2] > start:
+            side = [min(side[0], keep[across]), max(side[1], keep[across + 2])]
+        piece = [0, 0, 0, 0]
+        piece[axis], piece[axis + 2] = edge
+        piece[across], piece[across + 2] = (max(side[0], box[across]),
+                                            min(side[1], box[across + 2]))
+        if pieces and pieces[-1][across] == piece[across] \
+                and pieces[-1][across + 2] == piece[across + 2]:
+            pieces[-1] = union(pieces[-1], tuple(piece))   # one band, not two
+        else:
+            pieces.append(tuple(piece))
+    return pieces or None
+
+
+def stretched(box, span, frame):
+    """`box` widened to the whole of `span` across, where it sits off one flank of
+    `frame` and `span` reaches past both its ends.
+
+    A halo has to be dark inside any rectangle a neighbour's press puts on show, and
+    the clipper sees to that -- but dark inside is not the same as kept out. A small
+    button off one flank leaves the glow free to reach round it, above and below, and
+    then the smallest rectangle holding that glow holds the neighbour's rectangle too,
+    and the neighbour's glow with it: pressing this button lights the little one
+    beside it. The N64's A has `r` 31px off its right flank and half its height, and
+    A's own bloom was curling round it.
+
+    So where the glow would wrap, the keep-out is stretched and the glow stops flat
+    against it instead -- which is what leaves the box holding it a plain rectangle,
+    free to bloom on the sides where there is room. Nothing is stretched where the
+    neighbour already covers the span, or where it lies across a corner: a corner is
+    what `notched` takes out, and taking one out costs the glow nothing.
+
+    A disc comes back as its bounding rectangle. Stretched, a disc is no longer the
+    shape it was standing in for, and the wider keep-out is the safe way to be wrong
+    -- it costs a little glow, where the other way round lights a neighbour."""
+    for axis in (0, 1):
+        across = 1 - axis
+        if box[axis + 2] > frame[axis] and box[axis] < frame[axis + 2]:
+            continue                    # not off that flank: overlaps the frame
+        if box[across] > span[across] and box[across + 2] < span[across + 2]:
+            wide = list(box[:4])
+            wide[across], wide[across + 2] = span[across], span[across + 2]
+            return tuple(wide)
+    return box
+
+
+def covers(pieces, shape):
+    """Whether the union of `pieces` covers every pixel of `shape`."""
+    offset, size = (shape[0], shape[1]), (max(1, shape[2] - shape[0]),
+                                          max(1, shape[3] - shape[1]))
+    want = solid(size, shape, offset)
+    for piece in pieces:
+        if intersect(piece, shape) is None:
+            continue
+        want = ImageChops.subtract(want, solid(size, piece, offset))
+    return want.getbbox() is None
+
+
+def area(pieces):
+    """How much of the skin the union of `pieces` puts into the mask -- what a
+    companion costs its neighbours, and the one number two shapes for the same halo
+    can be compared by. A disc counts as the disc and not as the box it sits in."""
+    if not pieces:
+        return 0
+    span = pieces[0]
+    for piece in pieces[1:]:
+        span = union(span, piece)
+    size = (max(1, span[2] - span[0]), max(1, span[3] - span[1]))
+    filled = Image.new('L', size, 0)
+    for piece in pieces:
+        filled = ImageChops.lighter(filled, solid(size, piece,
+                                                  (span[0], span[1])))
+    return filled.histogram()[255]
 
 
 def ladder(top, bottom):
@@ -811,6 +1124,23 @@ def steps(halos, regions):
                                        stencil).getextrema()[1]
 
 
+def revealed(entry, regions):
+    """The brightest a halo gets inside the union of `regions`: how much of it a
+    press putting those rectangles into the mask would light up.
+
+    `steps` doesn't answer this and can't. A companion big enough to swallow a
+    neighbour's glow whole leaves no edge anywhere across it, so the pixels come out
+    perfectly clean while the wrong button lights up -- the one thing the whole
+    arrangement exists to prevent."""
+    stencil = Image.new('L', entry['alpha'].size, 0)
+    for box in regions:
+        if intersect(box, entry['box']) is None:
+            continue
+        stencil = ImageChops.lighter(
+            stencil, solid(entry['alpha'].size, box, entry['offset']))
+    return ImageChops.darker(entry['alpha'], stencil).getextrema()[1]
+
+
 def brightest(halos, regions):
     """The worst of those steps, giving up as soon as one is too big to accept."""
     worst = 0
@@ -821,12 +1151,17 @@ def brightest(halos, regions):
     return worst
 
 
-def build(rep, size, sources, points, ppp, report=None, sharing=GLOW_SHARE):
+def build(rep, size, sources, points, ppp, report=None, sharing=GLOW_SHARE,
+          vacated=None):
     """Work out every halo, and the companion items that let them be seen.
 
     `sources` maps an item's index to (silhouette, offset) in image pixels.
     Returns the glow laid over the whole image, the companions to append to
     `rep['items']`, and what each halo settled on.
+
+    `vacated` maps an item's index to (mask, offset): the ring of its own artwork
+    that a press slides out of, which the halo has to fill at full strength -- see
+    `insides` below.
 
     Every halo starts at the reach asked for and is trimmed until no mask
     rectangle in the skin cuts a visible step out of any of them. Trimming one
@@ -844,42 +1179,94 @@ def build(rep, size, sources, points, ppp, report=None, sharing=GLOW_SHARE):
     frames = [scaled(frame_box(item), to_pixels) for item in items]
     names = [input_names(item) for item in items]
 
-    # A halo reaches further out than the crop its artwork was found in has room
-    # for, so each silhouette moves onto a canvas of its own -- which also keeps
-    # the ring dilations off all the empty space around it. A d-pad keeps the
-    # silhouette it was found with: its frame is a square around a cross, and
-    # filling that square would put solid glow in the corners, where the shape of
-    # the thing being pressed is.
+    # Each silhouette onto a canvas with room for its halo; see `footprint`.
     silhouettes, arts, circles = {}, {}, {}
     for index, (art, offset) in sources.items():
-        span = art.getbbox()
-        if span is None:
+        found = footprint(art, offset, frames[index],
+                          round(wanted * max(1.0, CROSS_REACH)) + 4,
+                          directional(items[index]))
+        if found is None:
             continue
-        box = (offset[0] + span[0], offset[1] + span[1],
-               offset[0] + span[2], offset[1] + span[3])
-        want = box if directional(items[index]) else union(box, frames[index])
-        pad = round(wanted * max(1.0, CROSS_REACH)) + 4
-        origin = (want[0] - pad, want[1] - pad)
-        canvas = Image.new('L', (want[2] - want[0] + 2 * pad,
-                                 want[3] - want[1] + 2 * pad))
-        canvas.paste(art.crop(span), (box[0] - origin[0], box[1] - origin[1]))
-        if want != box:
-            canvas, circle = visible(
-                canvas,
-                (box[0] - origin[0], box[1] - origin[1],
-                 box[2] - origin[0], box[3] - origin[1]),
-                (frames[index][0] - origin[0], frames[index][1] - origin[1],
-                 frames[index][2] - origin[0], frames[index][3] - origin[1]),
-                round(RIM_SHARE * min(frames[index][2] - frames[index][0],
-                                      frames[index][3] - frames[index][1])))
-            span = canvas.getbbox()
-            box = (origin[0] + span[0], origin[1] + span[1],
-                   origin[0] + span[2], origin[1] + span[3])
-            if circle is not None and not directional(items[index]):
-                circles[index] = circle
+        canvas, origin, box = found['mask'], found['origin'], found['box']
+        if found['circle'] is not None:
+            circles[index] = found['circle']
         silhouettes[index] = (canvas, origin)
         arts[index] = box
     crosses = {index for index in silhouettes if directional(items[index])}
+    # A shoulder is a shoulder by its input, not its shape: `l` and `r` are drawn as a
+    # capsule on some of these skins and as a plain rounded slab on others, and both
+    # want the same thin ring. See `SHOULDER_POINTS`.
+    shoulders = {index for index in silhouettes
+                 if names[index] and names[index] <= SHOULDER_INPUTS}
+    ceiling = {index: max(1, round(SHOULDER_POINTS * ppp)) if index in shoulders
+                      else wanted
+               for index in silhouettes}
+
+    # The ring of its own artwork a press slides out of, at full strength, in the
+    # halo's coordinates.
+    #
+    # The overlay DeltaCore moves is drawn above the halo, and when it shrinks it
+    # uncovers a ring of whatever is behind it. Behind it during a press is this
+    # image -- the base with every halo on it -- and the base still has the button
+    # painted where it used to be, so that ring would show the button's old edge:
+    # the ghost outline the band of surrounding background used to be there to
+    # cover. That band is what was painting the halo out. Filling the ring with
+    # opaque glow instead covers the old edge with light, which is both what the
+    # eye should see under a sinking button and what lets the overlay be cut to the
+    # artwork alone.
+    #
+    # It only ever adds glow *inside* the silhouette, so every outer level -- which
+    # is what the reach search and the 6/255 edge tolerance are measured on -- is
+    # untouched. What it does add is a 255 step where there was none, in a place a
+    # mask region used to be free to end: over the artwork. So a region that carries
+    # a ring has to reach past it, out where the glow has faded (`wearing`, and for a
+    # d-pad's arms `INSIDE_SLACK` in `bands`).
+    insides, seams = {}, {}
+    for index, ring in (vacated or {}).items():
+        if index not in silhouettes:
+            continue
+        canvas, origin = silhouettes[index]
+
+        def held(mask, offset=ring['offset'], canvas=canvas, origin=origin):
+            """`mask` on the halo's canvas, and only where the artwork is."""
+            stencil = Image.new('L', canvas.size, 0)
+            stencil.paste(mask, (offset[0] - origin[0], offset[1] - origin[1]))
+            return ImageChops.multiply(
+                stencil.point(lambda v: 255 if v > EDGE_TOLERANCE else 0), canvas)
+
+        insides[index] = held(ring['mask'])
+        if index in crosses and ring.get('states'):
+            # How far back inside the frame each arm's rectangle has to reach to bury
+            # its own ring.
+            #
+            # Which ring is its own is a question of zones: a press lights the arms
+            # for the directions it holds, and what it uncovers falls inside those
+            # arms' zones -- a diagonal uncovers a piece at each of the two tips, one
+            # for each arm, and neither arm has to answer for the other's. Charging
+            # every arm with the whole of what a diagonal uncovers would have the up
+            # arm reaching to the far side of the cross, and its rectangle would then
+            # light the ring right round the shape.
+            frame, zoned = frames[index], zones(items[index], rep)
+            edges = {'up': lambda box: box[3] - frame[1],
+                     'down': lambda box: frame[3] - box[1],
+                     'left': lambda box: box[2] - frame[0],
+                     'right': lambda box: frame[2] - box[0]}
+            seams[index] = {}
+            for state, mask in ring['states'].items():
+                lifted = held(mask)
+                for side in state.split('+'):
+                    zone = scaled(zoned[side], to_pixels)
+                    patch = intersect(zone, (origin[0], origin[1],
+                                             origin[0] + lifted.width,
+                                             origin[1] + lifted.height))
+                    span = None if patch is None else lifted.crop(
+                        (patch[0] - origin[0], patch[1] - origin[1],
+                         patch[2] - origin[0], patch[3] - origin[1])).getbbox()
+                    if span is None:
+                        continue
+                    box = tuple(span[at] + patch[at % 2] for at in range(4))
+                    seams[index][side] = max(seams[index].get(side, CROSS_SEAM),
+                                             edges[side](box) + INSIDE_SLACK)
 
     # What the item's own touch frame puts into the mask. DeltaCore will draw it as
     # a disc instead of a rectangle (`mask: circle`: a radial gradient centred on
@@ -941,7 +1328,19 @@ def build(rep, size, sources, points, ppp, report=None, sharing=GLOW_SHARE):
         return index not in crosses and arts[index] == frames[index]
 
     def alike(index, other):
-        return (hugged(index) and hugged(other)
+        # A shoulder is never in a set with anything else, whatever it looks like. A
+        # cluster is held to one reach, the shortest any member can have, so a
+        # shoulder in one would hand its outline's ceiling to a button meant to bloom
+        # -- and on the GBA, whose `l` and `r` are drawn as round buttons in the same
+        # diamond as A and B, that took all four down to 4.0pt.
+        if (index in shoulders) != (other in shoulders):
+            return False
+        # Two shoulders, though, are a set whether or not their frames hug them: the
+        # same button drawn twice, mirrored, along the same edge. The N64's landscape
+        # pair came out 4.0pt and 3.0pt, which on rings that thin is one of them
+        # visibly fatter than the other.
+        return ((hugged(index) and hugged(other)
+                 or index in shoulders and other in shoulders)
                 and abs((frames[index][2] - frames[index][0])
                         - (frames[other][2] - frames[other][0])) <= 2 * ROUND_SLACK
                 and abs((frames[index][3] - frames[index][1])
@@ -960,6 +1359,10 @@ def build(rep, size, sources, points, ppp, report=None, sharing=GLOW_SHARE):
                     peers[member] = joined
 
     shaped, banded, crowds, fields = {}, {}, {}, {}
+    arm_caps = {}     # cross -> how far each arm may reach out, once levelled
+    arm_pieces = {}   # cross -> the rectangles its arms had before that
+    hard = {}         # item -> the keep-outs that are a neighbour's glow
+    glows = {}        # item -> the neighbouring halos behind those keep-outs
     mates = {}        # item -> every item whose press shows this one's halo
     seen = {}         # item -> every halo its own press shows, whole
 
@@ -976,6 +1379,34 @@ def build(rep, size, sources, points, ppp, report=None, sharing=GLOW_SHARE):
                              if index in circles
                              else depths(silhouettes[index][0], rings))
         return fields[index]
+
+    def wearing(index):
+        """The item's own frame as the mask has to cover it, at the least.
+
+        Normally that is the frame itself. An item with a ring inside its artwork
+        needs more: the ring runs right out to the artwork's edge, and the frame is
+        drawn to the artwork's edge too -- a disc inscribed in the frame of a round
+        button *is* the silhouette the halo starts from -- so a companion stopping
+        at the frame would leave a rim of mask lying along light at full strength,
+        which is the one thing no rectangle here may do. A couple of pixels past the
+        artwork puts the frame's rim safely inside the companion, where nothing
+        shows along it, and the companion's own rim out where the halo has already
+        faded."""
+        if index not in insides:
+            return masks[index]
+        art = arts[index]
+        return union(masks[index], (art[0] - INSIDE_SLACK, art[1] - INSIDE_SLACK,
+                                    art[2] + INSIDE_SLACK, art[3] + INSIDE_SLACK))
+
+    def filled(index, alpha):
+        """`alpha` with the ring the press vacates put back at full strength.
+
+        Applied wherever a halo is finished off, the clipping included: a keep-out
+        may lie over the button's own artwork, and a halo trimmed out of the ring
+        there would leave the ghost edge showing under the pressed overlay -- the
+        one thing this ring exists to cover."""
+        inside = insides.get(index)
+        return alpha if inside is None else ImageChops.lighter(alpha, inside)
 
     def shape(index, reach, face=FACE_FRACTION):
         """The halo an item wants at a given reach, before anything is taken out.
@@ -1001,7 +1432,7 @@ def build(rep, size, sources, points, ppp, report=None, sharing=GLOW_SHARE):
         in full."""
         art, offset = silhouettes[index]
         if index not in crosses:
-            return halo(art, reach, face=face, dist=distances(index))
+            return filled(index, halo(art, reach, face=face, dist=distances(index)))
         near, top = crowd(index), round(reach * CROSS_REACH)
         reach = max(1, top if near is None else min(top, max(reach, near // 2)))
         alpha = halo(art, reach, face=0.0, dist=distances(index))
@@ -1009,9 +1440,10 @@ def build(rep, size, sources, points, ppp, report=None, sharing=GLOW_SHARE):
                  frames[index][2] - offset[0], frames[index][3] - offset[1])
         ImageDraw.Draw(alpha).rectangle(
             (local[0], local[1], local[2] - 1, local[3] - 1), fill=0)
-        return arms(alpha, local, reach * CROSS_FADE,
-                    {side: mouth(art, local, side)
-                     for side in ('up', 'down', 'left', 'right')})
+        return filled(index, arms(alpha, local, reach * CROSS_FADE,
+                                  {side: mouth(art, local, side)
+                                   for side in ('up', 'down', 'left', 'right')},
+                                  caps=arm_caps.get(index)))
 
     def grown(index, reach, keepouts=(), ring=0, face=FACE_FRACTION):
         """A halo, the box it occupies, and the companion region that holds it.
@@ -1025,72 +1457,233 @@ def build(rep, size, sources, points, ppp, report=None, sharing=GLOW_SHARE):
         the clipping so the glow is unbroken around the artwork itself and only the
         bloom beyond it is one-sided.
 
-        `face` is how much of a wash the button's own face gets; see `faces`."""
+        `face` is how much of a wash the button's own face gets; see `faces`.
+
+        Two goes at it, because there are two ways for a halo to keep off a
+        neighbour's glow and the gentler one usually works. First the halo as it wants
+        to be, reaching round whatever is in its way. If no rectangle can carry that
+        without covering something -- which is what a halo curling round a small button
+        off one flank does -- then again with that flank stretched (`stretched`), so the
+        glow stops flat against it and the box holding it is clean. The second way
+        costs glow, all of it on the crowded side, and is only worth it where the first
+        way leaves the halo uncarryable."""
         offset, asked = silhouettes[index][1], reach
-        alpha = shape(index, reach, face)
-        if keepouts:
-            alpha = clip(alpha, offset, keepouts,
-                         min(reach * CLIP_FADE, CLIP_REACH * ppp))
-            if ring:
-                alpha = ImageChops.lighter(alpha, shape(index, ring, face))
-        span = alpha.getbbox() or (0, 0, 0, 0)
-        box = (span[0] + offset[0], span[1] + offset[1],
-               span[2] + offset[0], span[3] + offset[1])
-        region = union(box, masks[index])
-        alone = {index: {'alpha': alpha, 'offset': offset, 'box': box}}
+        want = shape(index, reach, face)
+        near = glows.get(index, ()) if keepouts else ()
 
-        if index in discs:
-            # One disc, as small as the glow allows: the tightest mask a round halo
-            # can have, so nothing is cut and nothing of a neighbour's is shown. The
-            # extra pixel is DeltaCore's own fade from white to clear.
+        def made(bounds, loose=False):
+            """The halo clipped to those keep-outs and the shape that carries it, or
+            `None` where nothing carries it and `loose` isn't set."""
+            alpha = want
+            if bounds:
+                alpha = clip(alpha, offset, bounds,
+                             min(reach * CLIP_FADE, CLIP_REACH * ppp))
+                if ring:
+                    alpha = ImageChops.lighter(alpha, shape(index, ring, face))
+                alpha = filled(index, alpha)
+            found = shaping(alpha, loose)
+            return None if found is None else dict(
+                found, alpha=alpha, offset=offset, reach=reach, asked=asked,
+                inside=insides.get(index))
+
+        def shaping(alpha, loose):
+            span = alpha.getbbox() or (0, 0, 0, 0)
+            box = (span[0] + offset[0], span[1] + offset[1],
+                   span[2] + offset[0], span[3] + offset[1])
+            region = union(box, wearing(index))
+            alone = {index: {'alpha': alpha, 'offset': offset, 'box': box}}
+            pieces = carried(alpha, box, region, alone, loose)
+            return None if pieces is None else {
+                'box': box, 'pieces': pieces,
+                'region': region if len(pieces) > 1 else union(region, pieces[0])}
+
+        def carried(alpha, box, region, alone, loose):
+            """The rectangles that will carry this halo: the smallest shape that fits
+            it, or `None` where none of them does and `loose` isn't set."""
+
+            def holds(piece):
+                """Whether a rectangle holds any of this halo worth showing."""
+                patch = intersect(piece, box)
+                return patch is not None and alpha.crop(
+                    (patch[0] - offset[0], patch[1] - offset[1],
+                     patch[2] - offset[0], patch[3] - offset[1])
+                    ).getextrema()[1] > EDGE_TOLERANCE
+
+            def fits(pieces):
+                """Whether a shape can carry this halo: every lit pixel of it inside the
+                union -- what is left outside is a notch bitten out of the glow -- nothing
+                of it along the union's boundary, and none of a neighbour's glow inside.
+                The item's own frame is counted in, because DeltaCore puts that in the mask
+                alongside the companion whenever the item is touched, and a rim buried in a
+                sibling shows nothing.
+
+                The neighbours matter here because a shape is not just a container: it is
+                what a press puts on show. A disc is the tightest mask an even halo can
+                have, but a one-sided one is not centred on its button, and a disc that
+                takes its radius from the long side comes back over the neighbour that
+                shortened the other -- so on the N64 the bloom A grew upwards would have
+                lit the little `r` off its right flank. The box does not have that fault,
+                so rejecting the disc costs a few pixels of mask rather than the glow."""
+                stencil = Image.new('L', alpha.size, 0)
+                for piece in pieces:
+                    stencil = ImageChops.lighter(stencil,
+                                                 solid(alpha.size, piece, offset))
+                return (ImageChops.subtract(alpha, stencil).getextrema()[1]
+                        <= EDGE_TOLERANCE
+                        and brightest(alone, list(pieces) + [masks[index]])
+                        <= EDGE_TOLERANCE
+                        and all(revealed(entry, list(pieces)) <= EDGE_TOLERANCE
+                                for entry in near))
+
+            def clean(insets):
+                """Whether the corners `notched` leaves out hold no glow.
+
+                Two things ride on that. Nothing is missing from the mask that was worth
+                drawing -- a corner cut out of a lit patch would read as a notch. And the
+                item's own frame, which is live beside its companion whenever the item
+                itself is touched, may stick out through the cut: the frame hugs the
+                artwork, so if the corner is dark then the sliver of frame rim left on
+                show out there has nothing along it either."""
+                top, bottom, left, right = insets
+                for x, wide in ((region[0], left), (region[2] - right, right)):
+                    for y, high in ((region[1], top), (region[3] - bottom, bottom)):
+                        if wide and high and holds((x, y, x + wide, y + high)):
+                            return False
+                return True
+
+            # Two shapes, and whichever puts less of the skin into the mask wins, because
+            # what a companion covers is what its neighbours lose.
             #
-            # Centred on the button is the obvious answer and it is only right for a
-            # halo that reaches the same distance all round. One that blooms into the
-            # room on its left and fades out before the neighbour on its right is not
-            # centred on its button, and a disc that is loses half its radius to empty
-            # space on the crowded side -- reaching back over the very neighbour that
-            # shortened it, and taking that neighbour's own reach away in turn. So the
-            # centre of the glow is offered as well, and whichever gives the smaller
-            # disc wins. Either way `spanning` measures from the centre being tried,
-            # so the disc holds the whole halo and nothing is cut.
-            middle = ((masks[index][0] + masks[index][2]) / 2.0,
-                      (masks[index][1] + masks[index][3]) / 2.0)
-            circle = min((round_box(centre,
-                                    math.ceil(spanning(alpha, offset, centre)) + 1)
-                          for centre in (middle, ((box[0] + box[2]) / 2.0,
-                                                  (box[1] + box[3]) / 2.0))),
-                         key=lambda disc: disc[2] - disc[0])
-            return {'alpha': alpha, 'offset': offset, 'reach': reach, 'asked': asked,
-                    'box': box, 'region': union(region, circle), 'pieces': [circle]}
+            # A disc is the tightest mask a round halo can have, and on a skin of round
+            # buttons that is most of the packing. Centred on the button is the obvious
+            # answer and it is only right for a halo that reaches the same distance all
+            # round: one that blooms into the room on its left and dies out before the
+            # neighbour on its right is not centred on its button, and a disc that is
+            # loses half its radius to empty space on the crowded side -- reaching back
+            # over the very neighbour that shortened it. So the centre of the glow is
+            # offered as well, and the smaller disc wins. Either way `spanning` measures
+            # from the centre being tried, so the disc holds the whole halo.
+            #
+            # The other is the box itself, cut in at each of its four sides as far as the
+            # glow allows, leaving out the corners where two of those cuts meet
+            # (`notched`). For an even halo that is an octagon and the disc is smaller.
+            # For a one-sided one it is the better shape by a long way: the disc has to
+            # take its radius from the longest reach and spends it in every direction,
+            # while the cuts come in wherever the glow has faded out.
+            # Measured to the glow the eye can see, not to the last pixel above zero.
+            # A halo closes with a blur and its outermost few pixels are worth a level
+            # or two out of 255 -- nothing a display shows, and the same nothing this
+            # whole arrangement is allowed to cut through (`EDGE_TOLERANCE`). Sized to
+            # those, a disc carries a few pixels of dead tail all the way round, and
+            # on a diamond of buttons that tail is what puts it over the neighbour it
+            # is trying to stay off.
+            shapes = []
+            if index in discs:
+                lit = alpha.point(lambda level: level if level > EDGE_TOLERANCE else 0)
+                middle = ((masks[index][0] + masks[index][2]) / 2.0,
+                          (masks[index][1] + masks[index][3]) / 2.0)
+                centre, radius = min(
+                    ((spot, int(math.ceil(spanning(lit, offset, spot))) + 1)
+                     for spot in (middle, ((box[0] + box[2]) / 2.0,
+                                           (box[1] + box[3]) / 2.0))),
+                    key=lambda pair: pair[1])
+                shapes += [[round_box(centre, radius - trim)]
+                           for trim in range(min(DISC_TRIMS, radius - 1) + 1)]
 
-        def hollow(cut):
-            """Whether the corner squares `plus` takes out hold no glow.
+            deepest = (min(region[2] - region[0], region[3] - region[1]) - 1) // 2
+            insets = [0, 0, 0, 0]
+            for _ in range(2):          # a second pass: a deeper cut on one side can
+                for side in range(4):   # let another go deeper still
+                    for cut in ladder(deepest, 1):
+                        if cut <= insets[side]:
+                            break
+                        trial = list(insets)
+                        trial[side] = cut
+                        if clean(trial):
+                            insets = trial
+                            break
+            if any(insets):
+                shapes += [notched(region, insets)]
+            shapes += [[region]]
 
-            Two things ride on that. Nothing is missing from the mask that was worth
-            drawing -- a corner cut out of a lit patch would read as a notch. And the
-            item's own frame, which is live beside its companion whenever the item
-            itself is touched, may stick out through the cut: the frame hugs the
-            artwork, so if the corner is dark then the sliver of frame rim left on
-            show out there has nothing along it either."""
-            for x, y in ((region[0], region[1]), (region[2] - cut, region[1]),
-                         (region[0], region[3] - cut),
-                         (region[2] - cut, region[3] - cut)):
-                patch = intersect((x, y, x + cut, y + cut), box)
-                if patch is not None and alpha.crop(
-                        (patch[0] - offset[0], patch[1] - offset[1],
-                         patch[2] - offset[0], patch[3] - offset[1])
-                        ).getextrema()[1] > EDGE_TOLERANCE:
-                    return False
-            return True
+            pieces = min((shape for shape in shapes if fits(shape)), key=area,
+                         default=None)
 
-        pieces = [region]
-        for cut in ladder(reach, 1):
-            trial = plus(region, cut)
-            if hollow(cut) and brightest(alone, trial) <= EDGE_TOLERANCE:
-                pieces = trial     # the deepest cut the glow itself allows
-                break
-        return {'alpha': alpha, 'offset': offset, 'reach': reach, 'asked': asked,
-                'box': box, 'region': region, 'pieces': pieces}
+            # A staircase is the shape of last resort and of best fit at once. It is
+            # the only one that can carry a lobe without covering the far side of the
+            # button, so it is tried wherever the simple shapes can't hold the halo at
+            # all, and wherever they hold it only by taking in most of the box. It
+            # costs items in the skin, so it has to earn them.
+            #
+            # For a round button the staircase alone is no use: the halo is a disc and
+            # a few bands across a disc are barely smaller than the box it sits in, and
+            # on a diamond of four buttons the wide middle band reaches into both of
+            # the diagonal neighbours at once. What that button wants is a ring and a
+            # lobe -- a disc over the even part of the glow, and a staircase over the
+            # bloom that carries on past it, tight to the one side it goes out on. The
+            # disc's rim shows nothing, because the halo has faded to nothing by there
+            # everywhere the staircase isn't sitting on top of it.
+            #
+            # This is what lets a face button in a diamond be bigger at all. Its
+            # neighbours are half a gap away and that half is spent; the room is
+            # outside the diamond, and a single disc big enough to reach it also
+            # reaches back over the neighbours -- lighting them if their glow is there
+            # already, and taking away the room for it if it isn't.
+            flights = []
+            # How much of its own disc the glow fills: a halo the clipper has been at
+            # has room in there to give back, an even one never has.
+            lopsided = index in discs and sum(
+                alpha.histogram()[EDGE_TOLERANCE + 1:]) < LOBE_FULL * area(shapes[0])
+            if pieces is None or lopsided \
+                    or area(pieces) > STAIR_GAIN * area([region]):
+                flights += [flight for cuts in STAIR_CUTS for axis in (0, 1)
+                            for flight in [staircase(alpha, offset, region,
+                                                     masks[index], cuts, axis)]
+                            if flight is not None and len(flight) > 1]
+                if index in discs:
+                    whole = (shapes[0][0][2] - shapes[0][0][0]) // 2
+                    least = int(math.ceil(max(masks[index][2] - middle[0],
+                                              masks[index][3] - middle[1]))) + 1
+                    for share in LOBE_SHARES:
+                        radius = least + int(round((whole - least) * share))
+                        if radius >= whole or radius <= least:
+                            continue
+                        inner = round_box(middle, radius)
+                        rest = ImageChops.subtract(
+                            alpha, solid(alpha.size, inner, offset))
+                        edge = rest.point(
+                            lambda level: 255 if level > EDGE_TOLERANCE else 0
+                            ).getbbox()
+                        if edge is None:
+                            continue
+                        lobe = (edge[0] + offset[0], edge[1] + offset[1],
+                                edge[2] + offset[0], edge[3] + offset[1])
+                        flights += [[inner, lobe]] + [
+                            [inner] + flight
+                            for cuts in STAIR_CUTS for axis in (0, 1)
+                            for flight in [staircase(rest, offset, lobe,
+                                                     None, cuts, axis)]
+                            if flight is not None and len(flight) > 1]
+                climbed = min((flight for flight in flights if fits(flight)),
+                              key=area, default=None)
+                if climbed is not None and (pieces is None
+                                            or area(climbed)
+                                            <= STAIR_GAIN * area(pieces)):
+                    pieces = climbed
+            return [region] if pieces is None and loose else pieces
+
+        def flattened():
+            """The keep-outs, with any that this halo would otherwise reach round
+            stretched across the flank it sits on; see `stretched`."""
+            reached = want.getbbox() or (0, 0, 0, 0)
+            span = (reached[0] + offset[0], reached[1] + offset[1],
+                    reached[2] + offset[0], reached[3] + offset[1])
+            flanked = set(hard.get(index, ()))
+            return [stretched(box, span, masks[index]) if box in flanked else box
+                    for box in keepouts]
+
+        return (made(keepouts) or made(flattened())
+                or made(keepouts, loose=True))
 
     def family(index):
         """Every item that shows this one's halo: itself, and anything it shares a
@@ -1280,6 +1873,11 @@ def build(rep, size, sources, points, ppp, report=None, sharing=GLOW_SHARE):
         the join properly inside the union, and the frame has no glow in it to
         show anyway.
 
+        Except where the tilt's own ring is in there (`seams`): then the arm reaches
+        back past the ring instead, so the rectangle's inner rim still lands on
+        nothing lit. Sideways it is already clear -- the wedge outside the frame
+        spreads wider than the mouth the ring ends at.
+
         Out past the frame each piece is pulled in to the arm it holds. The arm is a
         wedge as wide as the mouth the artwork makes in the frame's edge (`arms`),
         which on the N64's C-pad is a third of the frame it sits in -- so a piece
@@ -1290,15 +1888,27 @@ def build(rep, size, sources, points, ppp, report=None, sharing=GLOW_SHARE):
         holds still holds all of it."""
         key = (index, entry['asked'], entry['box'])
         if key not in banded:
-            box, frame, seam = entry['box'], frames[index], CROSS_SEAM
-            pieces = {'up': (frame[0], box[1], frame[2], frame[1] + seam),
-                      'down': (frame[0], frame[3] - seam, frame[2], box[3]),
-                      'left': (box[0], frame[1], frame[0] + seam, frame[3]),
-                      'right': (frame[2] - seam, frame[1], box[2], frame[3])}
+            box, frame = entry['box'], frames[index]
+            seam = seams.get(index, {})
+            deep = {side: seam.get(side, CROSS_SEAM)
+                    for side in ('up', 'down', 'left', 'right')}
+            pieces = {'up': (frame[0], box[1], frame[2], frame[1] + deep['up']),
+                      'down': (frame[0], frame[3] - deep['down'], frame[2], box[3]),
+                      'left': (box[0], frame[1], frame[0] + deep['left'], frame[3]),
+                      'right': (frame[2] - deep['right'], frame[1], box[2], frame[3])}
+            # An arm cut back to match its siblings (`evened`) keeps the rectangle it
+            # had before the cut, which is the one already known to be clean. Pulling
+            # a rectangle in is not free: a neighbour's glow that was buried inside
+            # the old one can be left crossing the rim of the new one, and there is
+            # nothing to gain here anyway -- the extra ground is glow this halo has
+            # just given up, so it shows the same shell either way.
+            kept = arm_pieces.get(index, {})
             banded[key] = {
-                side: hugging(entry, piece, side)
+                side: union(hugging(entry, piece, side), kept[side])
+                if side in kept else hugging(entry, piece, side)
                 for side, piece in pieces.items()
-                if piece[2] > piece[0] and piece[3] > piece[1] and lit(entry, piece)}
+                if piece[2] > piece[0] and piece[3] > piece[1]
+                and (side in kept or lit(entry, piece))}
         return banded[key]
 
     def hugging(entry, piece, side):
@@ -1370,7 +1980,7 @@ def build(rep, size, sources, points, ppp, report=None, sharing=GLOW_SHARE):
     # all, so `sharing` is the most halos allowed to light together. 1 keeps every
     # halo to itself, at whatever reach it can have alone.
     if sharing > 1:
-        wide = {index: bare(index, wanted) for index in silhouettes}
+        wide = {index: bare(index, ceiling[index]) for index in silhouettes}
         mates.update(share([(index, other) for index in sorted(silhouettes)
                             for other in sorted(cut_by(index, wide[index]))],
                            sharing))
@@ -1385,7 +1995,8 @@ def build(rep, size, sources, points, ppp, report=None, sharing=GLOW_SHARE):
     # `room` is where the ladder starts, not a verdict. It goes by pixels now, but the
     # closing blur carries a little past the reach it was grown to, so the ladder
     # still has the last word.
-    asked = {index: max(floor, min(wanted, room(index))) for index in silhouettes}
+    asked = {index: max(floor, min(ceiling[index], room(index)))
+             for index in silhouettes}
     asked = {index: min(asked[other] for other in peers[index])
              for index in silhouettes}          # a cluster glows as one; see `peers`
     # And the ceiling for the rest of the search, `expand` included. Half the gap
@@ -1407,9 +2018,23 @@ def build(rep, size, sources, points, ppp, report=None, sharing=GLOW_SHARE):
     # the d-pad's own is there to be cut, but a neighbour reaching in would be.
     def fences(reaches):
         reachable = {index: bare(index, reaches[index]) for index in silhouettes}
-        return {index: [piece for other in silhouettes
-                        for piece in fenced(index, other, reachable[other])]
-                for index in silhouettes}
+        found = {index: [piece for other in silhouettes
+                         for piece in fenced(index, other, reachable[other])]
+                 for index in silhouettes}
+        # Which of the keep-outs are somebody's glow, and whose. Kept here rather than
+        # passed down because `grown` is handed one flat list of everything it has to
+        # stay dark on, and a neighbour's glow is the one kind that has to be worked
+        # round rather than merely faded before: widened where it would otherwise be
+        # wrapped (`stretched`), and never covered by the rectangle that ends up
+        # carrying this halo (`grown`).
+        hard.clear()
+        hard.update({index: [tuple(box) for box in boxes]
+                     for index, boxes in found.items()})
+        glows.clear()
+        glows.update({index: [reachable[other] for other in silhouettes
+                              if fenced(index, other, reachable[other])]
+                      for index in silhouettes})
+        return found
 
     # The lines with nothing behind them: a frame that stays on show but has no glow
     # of its own, and the edge of the display. Crossing one of these spoils nothing,
@@ -1424,8 +2049,21 @@ def build(rep, size, sources, points, ppp, report=None, sharing=GLOW_SHARE):
     # revealed or hidden, so `step` has nothing to measure and never complained; it
     # is just ugly. Faded, it reads as a light that doesn't reach the edge rather
     # than one sawn off at it.
+    # Unless the edge runs through the button itself. A shoulder button on these skins
+    # is flush with it -- the NDS's `l` reaches x=0 -- and then there is no reach at
+    # which a ring around it is dark at the edge, because the light that wraps its ends
+    # is at the edge by the time it has gone anywhere. Asking anyway got the answer
+    # `nothing fits`, which is how the shoulders ended up as the one thing on these
+    # skins with no even collar at all: a crescent inside the button and a bloom past
+    # it, next to face buttons wearing complete rings. Where the artwork already runs
+    # off the display, light running off it too reads as the same thing, and the collar
+    # is worth more than the fade.
     display = (0, 0, size[0], size[1])
-    lines = {index: [display]
+    flush = {index for index in silhouettes
+             if min(arts[index][0] - display[0], arts[index][1] - display[1],
+                    display[2] - arts[index][2], display[3] - arts[index][3])
+             <= FLUSH_SLACK}
+    lines = {index: ([] if index in flush else [display])
                     + [masks[other] for other in range(len(items))
                        if other != index and index not in shown(other)
                        and exposed(other)]
@@ -1507,27 +2145,52 @@ def build(rep, size, sources, points, ppp, report=None, sharing=GLOW_SHARE):
                 rings[index] = reach
                 break
 
-    # Whether a bitten halo washes over the button's own face. The rectangles it is
-    # dodging belong to its neighbours and can run right across the artwork, so the
-    # fade that keeps it off one of those lines dims a patch of the button while it is
-    # being held -- which reads as the button lighting unevenly, and a glow that draws
-    # attention to its own edges is worse than one that doesn't reach. Kept to the rim
-    # instead, an obstructed glow just looks obstructed.
+    # And every halo that isn't bitten keeps the reach it settled on here as its ring,
+    # because `expand` is about to try to grow it. A halo growing past what fits on
+    # every side is the whole point of that pass -- the room a button has is rarely the
+    # same in all four directions, and the N64's A had an inch of bare bezel above it
+    # and a neighbour 38px to its left -- but it means the clipper starts biting into
+    # a glow that was even a moment ago. Underneath it goes the even reach it had
+    # before it grew, so what the eye sees is a whole ring at the button's edge with
+    # the bloom past it one-sided, and never a rim with a piece missing.
+    # Only those, though. A bitten halo the ladder above found no clear ring for is
+    # hemmed in on every side at once, and handing it the reach it asked for as a ring
+    # would restore, under every trim, the very glow the clipper had just taken off it:
+    # the halo becomes unshrinkable and is dropped a few lines down for a step it can
+    # no longer fix. The DS shoulders, whose bloom reaches out over the save and load
+    # buttons, are exactly those halos.
+    rings.update({index: asked[index] for index in silhouettes
+                  if index not in rings and index not in bitten})
+
+    # A round button's halo is even or it is nothing. Everything above is about
+    # spending the room a button has, and a button never has the same room on every
+    # side: the clipper's answer is to reach as far as each direction allows and fade
+    # out where something is in the way, which is more glow but not a circle. On a
+    # ring around a round button the eye reads that straight away -- wide and bright
+    # on the open side, pinched and dim towards the neighbour -- and calls it a
+    # defect rather than a bonus, however much light it adds. So a round button takes
+    # the reach it can hold on every side at once (`rings`) and nothing is faded out
+    # of it: what it shows is a circle, the same width the whole way round.
     #
-    # That only holds while there is a rim left to carry it. Where the clipping takes
-    # most of that too, the wash is all the button has, and a lopsided face is better
-    # than a press with nothing to show for it.
+    # The round ones and the shoulders. A shoulder used to keep the clipper so its
+    # bloom could reach out over the save and load buttons beside it, but a bloom is
+    # not what it takes now (`SHOULDER_POINTS`) -- and a ring thin enough to be an
+    # outline is short enough to fit whole, so there is nothing left to trade. A d-pad
+    # still keeps the clipper: it glows in the direction being pushed and is one-sided
+    # by design. And a halo the ring ladder found nothing even for at all keeps it too
+    # -- for those the choice is lopsided or unlit, and lopsided wins.
+    even = {index for index in set(circles) | shoulders
+            if index not in clipped and (index not in bitten or index in rings)}
+    clips = {}                  # what the clipper would have been asked for
+    for index in sorted(even & bitten):
+        clips[index] = asked[index]
+        asked[index] = rings[index]
+    bitten -= even
+
+    # No halo washes over the button's own face; see `FACE_FRACTION`. Kept as a
+    # per-halo table because everything below asks for a halo by reach *and* face,
+    # and a skin built with the wash turned back on has to go on working.
     faces = {}
-    for index in sorted(bitten):
-        reach, ring = asked[index], rings.get(index, 0)
-        washed = grown(index, reach, blocks(index), ring, FACE_FRACTION)
-        if mass(washed['alpha']) >= FACE_KEEP * mass(
-                bare(index, reach, FACE_FRACTION)['alpha']):
-            continue          # barely touched: the wash comes out even enough
-        rimmed = grown(index, reach, blocks(index), ring, 0.0)
-        if mass(rimmed['alpha']) >= FACE_DROP * mass(
-                bare(index, reach, 0.0)['alpha']):
-            faces[index] = 0.0
 
     def at(index, reach):
         """A halo at a given reach, remembered: the search keeps asking for the
@@ -1537,7 +2200,7 @@ def build(rep, size, sources, points, ppp, report=None, sharing=GLOW_SHARE):
         is skipped."""
         if (index, reach) not in shaped:
             shaped[(index, reach)] = grown(
-                index, reach, blocks(index),
+                index, reach, () if index in even else blocks(index),
                 rings.get(index, 0), faces.get(index, FACE_FRACTION))
         return shaped[(index, reach)]
 
@@ -1563,6 +2226,28 @@ def build(rep, size, sources, points, ppp, report=None, sharing=GLOW_SHARE):
         """The worst step each of those items would leave along its mask."""
         return {position: brightest(halos, regions(halos, position))
                 for position in positions}
+
+    def strays(halos, positions, cap=EDGE_TOLERANCE):
+        """The brightest foreign halo any of these presses would light.
+
+        A press lights the button under your thumb and nothing else -- that rule is
+        what bounds every reach here, and until a halo was allowed to be one-sided the
+        geometry kept it on its own: half the gap each, and half a gap is too short to
+        reach the neighbour. A bloom that runs past the halfway line has no such
+        guarantee, so this is measured directly, on the same rectangles DeltaCore will
+        build. See `revealed` for why the steps can't see it."""
+        worst = 0
+        for position in positions:
+            live = None
+            for index in halos:
+                if index in shown(position):
+                    continue
+                if live is None:
+                    live = regions(halos, position)
+                worst = max(worst, revealed(halos[index], live))
+                if worst > cap:
+                    return worst
+        return worst
 
     def blame(halos, index, positions, cap=EDGE_TOLERANCE):
         """The worst step this one halo is on the hook for.
@@ -1616,7 +2301,8 @@ def build(rep, size, sources, points, ppp, report=None, sharing=GLOW_SHARE):
                 continue
             trial = {**halos, **{index: at(index, min(reaches)) for index in unit}}
             if max(step(trial, range(len(items))).values(),
-                   default=0) <= EDGE_TOLERANCE:
+                   default=0) <= EDGE_TOLERANCE \
+                    and strays(trial, range(len(items))) <= EDGE_TOLERANCE:
                 halos = trial
             elif DEBUG:
                 print('   uneven', unit, sorted(reaches))
@@ -1635,9 +2321,10 @@ def build(rep, size, sources, points, ppp, report=None, sharing=GLOW_SHARE):
                     reach = max(floor, round(asked[index] * trim))
                     trial = {**halos, index: at(index, reach)}
                     span = union(halos[index]['region'], trial[index]['region'])
+                    touched = affected(trial, index, span)
                     # A shorter reach is a worse glow, so take the first that fits.
-                    if blame(trial, index,
-                             affected(trial, index, span)) <= EDGE_TOLERANCE:
+                    if blame(trial, index, touched) <= EDGE_TOLERANCE \
+                            and strays(trial, touched) <= EDGE_TOLERANCE:
                         break
                 halos = trial
                 if halos[index]['reach'] != was:
@@ -1665,6 +2352,23 @@ def build(rep, size, sources, points, ppp, report=None, sharing=GLOW_SHARE):
         blamed = max(halos, key=lambda index: blame(halos, index, bad, cap=255))
         if blame(halos, blamed, bad, cap=255) <= EDGE_TOLERANCE:
             break                       # nothing to pin it on; leave it reported
+        if blamed in even:
+            # A round halo hemmed in past the point of trimming, which is the one
+            # case where being even costs a button its glow outright. Evenness is
+            # worth a shorter reach, not a dead button: the halo goes back to the
+            # clipper, fades out where the neighbour is, and keeps its even ring
+            # underneath as far as that goes. Once each, so a halo the clipper
+            # can't save either still ends up dropped below.
+            if DEBUG:
+                print('   declip', blamed, sorted(names[blamed]), 'blame',
+                      blame(halos, blamed, bad, cap=255), 'bad', bad)
+            even.discard(blamed)
+            bitten.add(blamed)
+            asked[blamed] = clips.get(blamed, asked[blamed])
+            for key in [key for key in shaped if key[0] == blamed]:
+                del shaped[key]
+            halos = relax(sorted(halos))
+            continue
         if DEBUG:
             print('   drops', blamed, sorted(names[blamed]), 'blame',
                   blame(halos, blamed, bad, cap=255), 'bad', bad,
@@ -1672,6 +2376,29 @@ def build(rep, size, sources, points, ppp, report=None, sharing=GLOW_SHARE):
         del halos[blamed]
         dropped.append(blamed)
         halos = relax(sorted(halos))
+
+    def refresh(field, changed):
+        """The fences brought up to date with halos that have just moved, and every
+        shape chosen against the old ones forgotten.
+
+        The clipper fades a halo out before its neighbours' rectangles and the shape
+        search keeps its own rectangles off their glow -- both read the neighbours as
+        they were when the fences were last measured. A halo that has just grown makes
+        that reading wrong in the one direction that matters: the next halo along is
+        fitted against a glow that has moved outwards, so it is allowed to reach where
+        the light now is, and the step it takes is thrown out for a collision nobody
+        had to have. Cheap to redo -- `fenced` is arithmetic -- and what it costs is
+        the remembered shapes, which have to be rebuilt anyway to be worth anything."""
+        stale = [index for index in glows
+                 if any(fenced(index, other, field[other])
+                        for other in changed if other in field and other != index)]
+        for index in stale:
+            fresh = [(other, fenced(index, other, field[other]))
+                     for other in sorted(field)]
+            glows[index] = [field[other] for other, boxes in fresh if boxes]
+            keepouts[index] = [box for _, boxes in fresh for box in boxes]
+            hard[index] = [tuple(box) for box in keepouts[index]]
+            forget(index)
 
     def expand(halos):
         """Let an even halo grow back into room the trimming took off it.
@@ -1696,7 +2423,17 @@ def build(rep, size, sources, points, ppp, report=None, sharing=GLOW_SHARE):
         every one of them can hold it, so they stay the same size as each other all
         the way up. One growing alone is how a cluster ends up askew, and it is worth
         more to the eye that four halos match than that one of them is a pixel
-        wider."""
+        wider.
+
+        As one, but one at a time. Four halos in a diamond all reaching for the same
+        step at once each grow towards the others, and a step every one of them could
+        have taken is thrown out because two of them met in the middle -- which is why
+        the face buttons stayed at the reach the ladder left them however much bare
+        shell was outside the diamond. Taken in turn, each one is grown against its
+        neighbours as they stand: the clipper fades it out before their glow, so the
+        step goes on the sides where there is room and nowhere else, and the neighbour
+        that follows is fenced by what this one has just become. The whole unit is
+        still kept or dropped together, so they stay level."""
         given = {index: halos[index]['asked'] for index in halos}
         # A lopsided halo grows too, on its own. It is the one that most needs to --
         # what made it lopsided was a rectangle across its artwork, which says nothing
@@ -1704,45 +2441,190 @@ def build(rep, size, sources, points, ppp, report=None, sharing=GLOW_SHARE):
         # there is nobody to keep in step with. The N64's A had a C-pad arm over its
         # bottom third and an inch of empty bezel above it.
         units = teams(halos) + [(index,) for index in sorted(halos) if index in clipped]
+        walled = set()
         for _ in range(ROUNDS):
             grew = False
             for unit in units:
-                if not unit or max(given[index] for index in unit) >= wanted:
+                # The unit's own ceiling, not the reach asked for on the command line:
+                # a shoulder's ring is thin on purpose, and this pass spends leftover
+                # room, which is exactly what a shoulder has most of.
+                top = min(ceiling[index] for index in unit) if unit else wanted
+                if not unit or tuple(unit) in walled \
+                        or max(given[index] for index in unit) >= top:
                     continue
                 held = min(given[index] for index in unit)
-                reach = min(wanted, max(held + 1, round(held / TRIMS[1])))
-                trial, span = dict(halos), None
-                for index in unit:
-                    trial[index] = at(index, reach)
-                    span = union(halos[index]['region'], trial[index]['region']) \
-                        if span is None else union(span, trial[index]['region'])
-                # The whole field, not just this halo's share: a longer reach moves
-                # the region as well, and a neighbour that was dark inside the old
-                # one may not be inside the new one.
-                touched = set()
-                for index in unit:
-                    touched |= affected(trial, index, span)
-                if max(step(trial, touched).values(), default=0) <= EDGE_TOLERANCE:
-                    halos, grew = trial, True
+                reach = min(top, max(held + 1, round(held / TRIMS[1])))
+                # A step the unit can't hold whole is not the end of it: what it can
+                # hold is somewhere between here and there, so the step is halved and
+                # tried again, down to a single pixel. The ladder climbs in fifths and
+                # a diamond of buttons has a few pixels of room, not a fifth of one --
+                # without this the whole cluster stays at the rung below and the room
+                # goes unused.
+                stuck = True
+                while stuck is not None and reach > held:
+                    trial, stuck = dict(halos), None
                     for index in unit:
-                        given[index] = reach
+                        each = {**trial, index: at(index, reach)}
+                        # The whole field, not just this halo's share: a longer reach
+                        # moves the region as well, and a neighbour that was dark inside
+                        # the old one may not be inside the new one.
+                        touched = affected(each, index,
+                                           union(halos[index]['region'],
+                                                 each[index]['region']))
+                        if max(step(each, touched).values(),
+                               default=0) <= EDGE_TOLERANCE \
+                                and strays(each, touched) <= EDGE_TOLERANCE:
+                            trial = each
+                            refresh(trial, [index])
+                            continue
+                        stuck = (index, each, touched)
+                        break
+                    if stuck is None:
+                        halos, grew = trial, True
+                        for index in unit:
+                            given[index] = reach
+                        break
+                    refresh(halos, unit)    # the step is off; so are its fences
+                    if DEBUG:
+                        index, each, touched = stuck
+                        found, culprit = max(
+                            ((revealed(each[other], regions(each, position)),
+                              (position, other))
+                             for position in touched for other in each
+                             if other not in shown(position)), default=(0, None))
+                        print('   stuck', unit, held, '->', reach, 'on',
+                              sorted(names[index]), 'step',
+                              max(step(each, touched).values(), default=0),
+                              'stray', found, culprit and
+                              (sorted(names[culprit[0]]),
+                               sorted(names[culprit[1]])))
+                    reach = held + (reach - held) // 2
+                if stuck is not None:
+                    # Not even a pixel. Nothing that follows will make room for it
+                    # either -- halos here only ever grow -- so the unit is done, and
+                    # the rounds left are spent on the ones that can still move.
+                    walled.add(tuple(unit))
             if not grew:
                 break
         return halos
 
-    halos = level(expand(halos))
+    def lengths(index, entry):
+        """How far past its frame each of a d-pad's arms carries, in pixels, read off
+        the rectangles the mask will really get."""
+        frame, found = frames[index], {}
+        for side, piece in bands(index, entry).items():
+            found[side] = max(0, frame[1] - piece[1] if side == 'up' else
+                              piece[3] - frame[3] if side == 'down' else
+                              frame[0] - piece[0] if side == 'left' else
+                              piece[2] - frame[2])
+        return found
+
+    def forget(index):
+        """Everything remembered about one item's shape, dropped -- its arms are
+        about to be cut back, so none of it describes the halo any more."""
+        for key in [key for key in shaped
+                    if key[0] == index or (key[0] == 'bare' and key[1] == index)]:
+            del shaped[key]
+        for key in [key for key in banded if key[0] == index]:
+            del banded[key]
+
+    def evened(halos):
+        """A d-pad whose arms came out grossly unalike, cut back to its shortest.
+
+        Reach is decided per side, against whatever that side runs into, and on most
+        of these crosses the four sides run into much the same thing -- open shell --
+        so they come out level on their own. The N64's portrait d-pad doesn't: the
+        thumbstick's disc sits 49px above it and the up arm can never be more than
+        that, while the other three had over 120px. Four arms of obviously different
+        lengths read as a mistake even though each is as long as it can be, so the
+        long ones give up their tips (`arms`, `reaching`).
+
+        Only where it is really lopsided, and only when the short arm is still worth
+        levelling to: cutting three good arms back to a stub would trade one flaw for
+        a worse one, and levelling a cross whose arms differ by a few pixels would
+        cost the d-pads their bloom for nothing the eye can see. Shorter is safe on
+        its face -- less glow in less space -- but the rectangles come in with it, so
+        the field is measured again all the same."""
+        for index in sorted(halos):
+            if index not in crosses:
+                continue
+            found = lengths(index, halos[index])
+            if DEBUG:
+                print('   arms', index, sorted(names[index]), found)
+            if len(found) < 4:
+                continue
+            short, long = min(found.values()), max(found.values())
+            if short < LEVEL_FLOOR * ppp or long < LEVEL_RATIO * short:
+                continue
+            arm_caps[index] = {side: short for side in found}
+            arm_pieces[index] = dict(bands(index, halos[index]))
+            forget(index)
+            trial = {**halos, index: at(index, halos[index]['asked'])}
+            if max(step(trial, range(len(items))).values(),
+                   default=0) <= EDGE_TOLERANCE \
+                    and strays(trial, range(len(items))) <= EDGE_TOLERANCE:
+                if DEBUG:
+                    print('   levels', index, sorted(names[index]), found,
+                          '-> %dpx each' % short)
+                halos = trial
+            else:
+                if DEBUG:
+                    print('   uneven arms', index, 'step',
+                          max(step(trial, range(len(items))).values(), default=0),
+                          'stray', strays(trial, range(len(items)), cap=255))
+                del arm_caps[index]
+                del arm_pieces[index]
+                forget(index)
+        return halos
+
+    halos = evened(level(expand(halos)))
+
+    def held(entry, rect):
+        """How much glow an entry holds inside one rectangle."""
+        alpha, offset = entry['alpha'], entry['offset']
+        box = (max(rect[0] - offset[0], 0), max(rect[1] - offset[1], 0),
+               min(rect[2] - offset[0], alpha.width),
+               min(rect[3] - offset[1], alpha.height))
+        if box[2] <= box[0] or box[3] <= box[1]:
+            return 0.0
+        return mass(alpha.crop(box))
+
+    def emptied(index):
+        """Whether what the clipping left is too little to be worth showing, as a
+        share of the same halo unclipped.
+
+        A d-pad is judged an arm at a time and by its worst one, because that is how
+        it is shown: a press lights one arm, and an arm the clip has emptied is a
+        press with nothing to show for it while its neighbour lights up fully. Worse,
+        what survives in a nearly-empty arm is whatever corner of it fell outside
+        every foreign frame -- a bar of light off to one side of the button, which
+        reads as a bug rather than as a glow. The N64's C buttons are that case:
+        their four buttons are one item covering the whole cluster, glow inside the
+        frame would light all four at once, and each arm is left with a sliver above
+        or below the button and nothing at all to the sides."""
+        entry = halos[index]
+        whole = bare(index, entry['asked'], faces.get(index, FACE_FRACTION))
+        if index not in crosses:
+            return mass(entry['alpha']) < EMPTY_SHARE * max(1.0,
+                                                            mass(whole['alpha']))
+        # `bands` leaves out an arm with nothing lit in it, so four is what a d-pad
+        # has when every direction glows and anything less is a dark one.
+        pieces = bands(index, entry)
+        shares = [held(entry, piece) / max(1.0, held(whole, piece))
+                  for piece in pieces.values()]
+        if DEBUG:
+            print('   limbs', index, sorted(names[index]), len(pieces), 'arms',
+                  ['%.0f%%' % (100.0 * share) for share in sorted(shares)])
+        return len(pieces) < 4 or min(shares, default=0.0) < CROSS_EMPTY
 
     # A halo can come through the trimming intact and still hold nothing. A d-pad
     # only glows outside its own frame, and on a skin where every side of it is
     # somebody else's frame the clipping can take the whole strip. Calling that
     # unlit is more use than a companion that lights nothing.
     for index in sorted(halos):
-        if mass(halos[index]['alpha']) < EMPTY_SHARE * max(1.0, mass(bare(
-                index, halos[index]['asked'],
-                faces.get(index, FACE_FRACTION))['alpha'])):
+        if emptied(index):
             if DEBUG:
-                print('   culls', index, sorted(names[index]),
-                      mass(halos[index]['alpha']))
+                print('   culls', index, sorted(names[index]))
             del halos[index]
             dropped.append(index)
 
@@ -1810,6 +2692,10 @@ def build(rep, size, sources, points, ppp, report=None, sharing=GLOW_SHARE):
                     'even ring %.1fpt, bloom hemmed in on some sides'
                     % (rings[index] / ppp) if index in rings
                     else 'hemmed in on some sides'))
+            if index in arm_caps:
+                report.append('%d: arms levelled to %.1fpt each -- one direction had '
+                              'far less room than the other three'
+                              % (index, min(arm_caps[index].values()) / ppp))
             together = sorted(shown(index) & set(halos) - {index})
             if together:
                 report.append('%d: lights with %d other halo%s, all of them whole'
@@ -1859,6 +2745,63 @@ def apply(base, field, opacity=GLOW_OPACITY, color=GLOW_COLOR):
     pressed = base.copy()
     pressed.alpha_composite(over)
     return pressed
+
+
+def shell_level(base, entry):
+    """How light the skin is under one halo, 0-255, or `None` where the halo has
+    no bright part to measure.
+
+    Measured under the band right against the artwork -- where the glow is at full
+    strength, and where the contrast between it and the shell decides whether the
+    press is seen at all. The ring inside the artwork doesn't count: what is under
+    it is the button's own edge, which the pressed overlay covers, and a dark button
+    on a pale shell would otherwise vote for the shell being dark."""
+    core = entry['alpha'].point(lambda level: 255 if level > 200 else 0)
+    if entry.get('inside') is not None:
+        core = ImageChops.subtract(core, entry['inside'])
+    span = core.getbbox()
+    if span is None:
+        return None
+    offset = entry['offset']
+    patch = base.convert('L').crop((span[0] + offset[0], span[1] + offset[1],
+                                    span[2] + offset[0], span[3] + offset[1]))
+    stencil = core.crop(span)
+    lit = stencil.histogram()[255]
+    if not lit or patch.size != stencil.size:
+        return None
+    return mass(ImageChops.multiply(patch, stencil)) / float(lit)
+
+
+def suggest_color(levels, pale=PALE_LEVEL):
+    """White, or `GLOW_WARM` if any of the buttons sits on a shell too pale for
+    white to be seen against. `levels` is one `shell_level` per halo in the skin.
+
+    Judged by the palest button rather than by the skin's average, because that is
+    where the glow fails. The N64 is the case: a carbon shell almost throughout, and
+    its A and B sit on a light grey plate -- so the average says white and the two
+    buttons that most need to be seen are the two that vanish. A skin gets one
+    colour (see `process`), so one button lost to it is enough to warm the lot.
+
+    A glow is light, and light is only visible as a difference. On a dark shell
+    white is the whole of that difference and nothing else looks as much like a
+    lamp. On the N64's grey plate and the SNES's pale shell it isn't: the plate is
+    already near white, so a white ring reads as paint on the plastic rather than
+    as a button lighting up -- the N64's A and B looked unlit in the built skin
+    even though the halo was there. Amber has somewhere to go on a pale shell,
+    because a shell may be light but is hardly ever *warm*.
+
+    A d-pad is left out of the vote. Its glow is four arms out on open shell rather
+    than a ring around a button, so it is the one control that is nowhere near as
+    hemmed in as the rest -- and on these skins it is also the one that sits on the
+    darkest part of the shell, which is how the N64 came out white."""
+    found = [level for level in levels if level is not None]
+    if not found:
+        return GLOW_COLOR
+    if DEBUG:
+        print('   shell %s/255 under the halos -- palest %.0f, %s'
+              % ('/'.join('%.0f' % level for level in sorted(found)), max(found),
+                 'so amber' if max(found) > pale else 'dark enough for white'))
+    return GLOW_WARM if max(found) > pale else GLOW_COLOR
 
 
 def pressed_name(asset):

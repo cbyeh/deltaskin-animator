@@ -71,7 +71,7 @@ totals.
 python3 animate.py "My Skin.deltaskin" --glow                     # animation and glow
 python3 animate.py "My Skin.deltaskin" --glow --no-animate        # glow only
 python3 animate.py "My Skin.deltaskin" --glow --glow-points 8     # a tighter halo
-python3 animate.py "My Skin.deltaskin" --glow --glow-color amber  # for a pale shell
+python3 animate.py "My Skin.deltaskin" --glow --glow-color white  # override the colour
 python3 animate.py "My Skin.deltaskin" --glow --glow-inputs all   # menus glow too
 ```
 
@@ -79,7 +79,7 @@ python3 animate.py "My Skin.deltaskin" --glow --glow-inputs all   # menus glow t
 | --- | --- | --- |
 | `--glow` | off | Add the halo. |
 | `--glow-points N` | `36` | How far past the artwork's edge it reaches, in points. |
-| `--glow-color C` | `white` | What it's made of: a CSS colour name, `amber`, or `#rrggbb`. |
+| `--glow-color C` | `auto` | What it's made of: `auto` to pick per skin, or a CSS colour name, `amber`, or `#rrggbb`. |
 | `--glow-opacity N` | `1.0` | How strong it gets at its brightest, `0`–`1`. |
 | `--glow-share N` | `1` | Most halos allowed to light together. `1` — the default — keeps every press to its own button. |
 | `--glow-inputs LIST` | `play` | Which buttons glow: `play` for the d-pad, face and shoulder buttons, `all` for every button, or a comma-separated list of Delta input names. |
@@ -96,10 +96,22 @@ A glow build is renamed — `My Skin [GLOW]`, identifier `…​.glow` — so De
 as a separate skin and you can keep both installed and switch between them. `--tag`
 changes the word if you'd rather it said something else.
 
-White works on any shell dark enough to show it, which is most of them. On a pale
-shell there is nothing for it to contrast against — a lit button and the plastic
-around it are both near white — and no amount of reach or opacity fixes that. That's
-what `--glow-color` is for; `amber` is the colour a light actually looks like.
+White works on any shell dark enough to show it, which is most of them. On a pale shell
+there is nothing for it to contrast against — a lit button and the plastic around it are
+both near white — and no amount of reach or opacity fixes that. So the colour is chosen
+per skin: the build measures the shell under each halo, and if the *palest* one is above
+`PALE_LEVEL` (115 of 255) the whole skin is built amber instead. The palest rather than
+the average, because a glow that shows on five buttons and vanishes on the sixth is the
+defect; and d-pads don't vote, since their arms sit on the darkest part of the shell.
+
+```
+   shell 99/111/130/130/255 under the halos -- palest 130, so amber
+  glow #ffb300 -- the shell is too pale for white
+```
+
+A skin gets one colour rather than one per button, because the checker proves a press
+lights nothing it shouldn't by requiring every changed pixel to lie between the base and
+that one colour. `--glow-color` overrides the choice.
 
 Each representation reports what its halos settled on:
 
@@ -116,7 +128,7 @@ halo at once and the mask only reveals the part of it under the button you're
 touching, so a press must not reach as far as a neighbour's glow — or it would show
 that glow, sliced off at a hard line. Two buttons therefore split the gap between them
 half each rather than the reach going to whichever was measured first, and each takes
-the longest reach that still comes out *even all the way round*: an even 10.7pt halo
+the longest reach that still comes out *even all the way round*: an even 12.3pt halo
 looks better than a lopsided 36pt one. The gap is measured on the artwork itself, not
 its bounding box, so four round buttons in a diamond get the room that's really
 between them; once everything is placed each halo grows back into whatever the others
@@ -124,17 +136,46 @@ left over.
 
 That half-gap split is the ceiling for anything in a cluster, so a default of 36pt is
 not the size a face button comes out at — it's the size the ones with room come out at.
-On the seven skins these were built for, 17 of 73 halos take the full 36pt, the rest
-land on a median of 10.7pt, and the ones that visibly bloom are the d-pads and the
-shoulder buttons, which have a corner of the shell to themselves. Raising
-`--glow-points` further changes only those; a tighter number is what shrinks a
-cluster.
+On the seven skins these were built for, 11 of 69 halos take the full 36pt, the rest
+land on a median of 8.7pt, and the ones that visibly bloom are the d-pads, which have a
+corner of the shell to themselves. Raising `--glow-points` further changes only those; a
+tighter number is what shrinks a cluster.
+
+The shoulders are the exception at the other end: **`l` and `r` take a thin outline**,
+`SHOULDER_POINTS` (4pt), however much room they have. They have the most of anything on
+these skins — 28.7pt on the DS against 7.3pt for a face button — and what came back for
+it was lopsided, a wide bloom on the open side and, where something was in the way, the
+fade cut off inside its own bright core, which is a hard bright line with a straight edge.
+The N64's landscape pair had 48px of bloom above and 10px below ending at full strength. A
+ring that thin is even on every side without asking anything of the room, and on a long
+button already at the edge of the picture an outline reads as clearly as a bloom. The reach
+goes to the buttons beside them instead: the GBA's A and B came up from 14.0pt to 16.7pt.
+
+An outline that thin has to be an outline of the *button*, which is a stricter thing to
+ask of the artwork search than an overlay is. The search stops at the first edge it
+can't cross, and where a button has an edge of its own inside it — the groove around the
+engraved *L* on the N64's portrait shoulders — the strictest threshold stops there and
+returns the 148x68 recess out of a 190x100 button, which clears `MIN_ART_FRACTION` on its
+own merits. Animating the recess is only a slightly smaller animation. A halo grown from
+it is an outline drawn *inside* the button, hugging the recess with the whole bezel dark
+outside it, which reads as a mistake rather than as a glow. So an item that is going to
+glow (`find_art(..., whole=True)`) keeps relaxing the threshold until what it found
+reaches out to its touch frame — the same test the silhouette's own growth applies before
+it trusts that frame — and the N64's portrait pair came back as the whole 184x117 plate.
+It isn't free: the plate really does extend 24px further down than the recess did, so the
+Z button below it, which had been blooming over that bezel, is held to 7.3pt instead of
+15.3pt. That is the honest number, and a neighbour half a glow smaller beats an outline
+around the wrong shape.
 
 Buttons the eye reads as a set come out **matching**, because a diamond of four whose
 halos differ by a couple of points looks like a mistake even where each one is
 individually as big as it could be. Same size, same kind of edge and close enough to be
 seen together makes a cluster, joined neighbour by neighbour so a diamond holds together
-even though its two diagonal corners are far apart. A cluster starts from the reach its
+even though its two diagonal corners are far apart. Two shoulders are a set as well,
+whatever shape they are — the same button drawn twice, mirrored — and a shoulder is never
+in a set with anything else, since a cluster is held to the shortest reach any member can
+have and an outline's 4pt would be that member. On the GBA, whose `l` and `r` are round
+buttons in the same diamond as A and B, it was. A cluster starts from the reach its
 tightest member can manage and grows in lockstep — a step is taken for all of them or
 none — so the whole set lands on one number. On the NDS diamond the four gaps aren't
 equal (43, 43, 43 and 48 pixels), and without this the odd one out would simply have
@@ -163,15 +204,25 @@ must not touch at all, and that's what the half-gap split above is for. A button
 stays on show with no glow of its own — start, select, save state — and **the display's
 own outer edge** are *soft*: nothing is sliced there, it's just somewhere a light
 shouldn't wash over. A halo therefore doesn't stop dead at those; it fades out over the
-last few points before it, so a shoulder button's bloom can reach out over the save and
-load buttons beside it and still leave the screen edge clean.
+last few points before it, so a d-pad's arm can reach out over the save and load buttons
+beside it and still leave the screen edge clean.
 
 Where a halo has something in the way it keeps its reach on the sides that are clear
 and fades before the sides that aren't, which is what `keeps 54%` means. An
 `even ring 14.7pt` note says it still has an unbroken ring of that width around the
 artwork itself, so the button reads as lit all the way round and only the wider bloom is
-one-sided. Every halo on these seven skins comes out with a full even ring; the shoulder
-buttons keep 50–54% of their bloom, all of it lost to the display edge they sit under.
+one-sided. Round buttons on these seven skins are even outright rather than faded (one
+exception, below).
+
+The display's edge is soft with one exception: a button the edge runs *through*. A
+shoulder button on these skins is flush with it, and then there is no reach at which a
+ring around it is dark before the edge — the light that wraps the button's ends is at the
+edge as soon as it exists. Asking for one anyway gets `nothing fits`, which is how the
+shoulders came to be the only buttons on these skins with no even ring at all: a crescent
+inside the button and a lopsided bloom past it, next to face buttons wearing complete
+rings. Where the artwork already runs off the display, light running off it too reads as
+the same thing, so those buttons keep the ring and let it end at the edge — which is now
+the whole of a shoulder's glow rather than a collar under a bloom.
 The two lines worth a look are a low `keeps` percentage with *no* ring, and
 `no room for a glow at all -- left unlit`.
 
@@ -192,8 +243,13 @@ centring. On a glow build it also confirms the pressed image is nothing but the 
 own colour blended over the base, that every halo appears exactly when its own button
 is touched, that no mask edge cuts through a halo anywhere, and — by building the mask
 DeltaCore really would for a touch on each button in turn — that a press leaves every
-*other* button dark. Add `--original` to also confirm the name, identifier and every
-touch target came through unchanged:
+*other* button dark. It also composites each overlay in its pressed position over what
+the device would really have behind it, twin included, and fails if the ring the press
+moves off is left showing the button's own edge — the ghost the band exists to cover,
+checked on the finished skin rather than trusted to the build.
+
+Add `--original` to also confirm the name, identifier and every touch target came
+through unchanged:
 
 ```
 python3 verify.py animated/"My Skin.deltaskin" --original "My Skin.deltaskin"
@@ -230,6 +286,13 @@ If a button's artwork can't be made out at all, the tool animates the shape of i
 touch frame instead — a circle if the frame is square, a capsule if it's long — so
 the button still responds. That's the fallback, not the normal path, and it shows up
 as `frame shape` in the output.
+
+Such an item animates but never **glows**, whatever its input. A halo says "this is
+the button you pressed", so it needs a button to say it about, and an item with no
+artwork the tool could find usually has none to find: the N64 skin's second `r` is
+the engraved *R* legend printed on the shell beside the A button, marking where the
+trigger up at the top edge maps. Both are the same input, so a press lit both — the
+trigger's ring, and a square of light out on bare plastic.
 
 ## How it works
 
@@ -269,6 +332,15 @@ the ghost we're avoiding.
 Where a button is fenced in so tightly that even the widest band can't cover it, the
 asset box is padded symmetrically instead. That damps the movement — less travel, but
 no ghost. Buttons tangent to the edge of the plate they sit on usually end up here.
+
+**A glowing button skips the band altogether.** With `--glow` the pixels behind the
+overlay during a press are the pressed twin, so the old edge can be covered by light
+instead of by background: the overlay is cut to the artwork alone, and the halo is
+filled in at full strength over exactly the ring the press moves off (see
+[How the glow works](#how-the-glow-works)). No band means nothing scaling the
+transform down either, so those buttons move 97–99% of the full press depth rather
+than the 70–85% a band leaves. The band is still there for everything that doesn't
+glow, and for the rare glowing item whose halo doesn't survive the packing.
 
 `skinlib.py` finds the artwork, `press.py` is DeltaCore's transform, `animate.py`
 chooses each band and writes the skins, `verify.py` checks them.
@@ -346,6 +418,16 @@ spent the second half of that budget on nothing. Staying bright almost to the en
 then dropping is what a crowded cluster can afford, and it's worth about a tenth of the
 visible aura.
 
+The inner part of it doesn't fade at all: the first 55% of the reach is fully opaque
+(`GLOW_CORE`), rejoining the fade over the 20% past that (`GLOW_EDGE`). Translucent colour
+takes its brightness from whatever is underneath, so a halo that fades from the first
+pixel is bright where it crosses a pale plate and dull where it crosses the button's own
+drop shadow — one ring, lit unevenly, which is read as a fault in the glow rather than in
+the artwork under it. Opacity near the button removes the question. It is free, too:
+what bounds every reach is where the halo's last levels fall below `EDGE_TOLERANCE`, and
+the core is layered under the original fade with `max()` so those levels don't move —
+verified identical from step 14 of 21 outwards.
+
 A disc is worth having in the other direction too, on the items that have no glow of
 their own: a combo zone, a touchscreen, a button `--glow-inputs` left out, or a d-pad,
 whose own glow lives outside its frame by construction. Their frames put nothing on
@@ -354,12 +436,44 @@ two shapes is strictly better. An N64's C-pad is a single 395-unit square with f
 other buttons packed against its corners, and shrinking it to a disc is the difference
 between four of that skin's halos coming out lopsided and one.
 
+### The glow covers the edge the button moved off
+
+There is one more thing drawn above all of this, and it is the reason the first glow
+builds looked so much dimmer on a phone than in a render of the pressed image. DeltaCore
+adds every animated item's overlay as a subview of the *controller view*, not of the
+layer the pressed image blends into — so each button's own overlay sits on top of its
+own halo. An overlay carrying a band of background is carrying an opaque copy of the
+shell, and the band is widest exactly where the halo is brightest: on the N64's d-pad,
+89 pixels of background over a 56-pixel glow. The halo was there in the file the whole
+time and the button was painting it out.
+
+The band was only ever there to cover the ring the press slides off. But behind the
+overlay during a press is the pressed image, and it is allowed to have light in that
+ring. So a glowing item's overlay is cut to the halo's own silhouette — no band, nothing
+of the surroundings, nothing over the glow — and the halo is extended *inward* at full
+strength over exactly the ring the transform vacates, measured in all nine press states.
+The old edge is covered by light instead of by shell, which is also what a button sinking
+into a lit recess ought to look like, and the item keeps the whole of its press depth.
+
+The ring is the one place a halo is opaque where a mask region is used to being free to
+end — inside the artwork — so a region carrying one has to reach past it, out where the
+glow has faded, or its own edge would show as a line across the button. For a d-pad that
+is per arm: each arm's rectangle reaches back inside the frame past the part of the ring
+its own direction uncovers, worked out by zone so a diagonal's two arms take a piece
+each instead of both claiming the whole thing.
+
+A bandless overlay is only safe if the halo really survives the packing, which isn't
+known until the packing has run. So the build runs it, and any item that comes out unlit
+with a ring still pending gets its band back and the packing runs again — it keeps its
+place in the queue, so it ends up exactly where it would have been without the ring. One
+item in the seven skins lands there: the N64's landscape d-pad, whose bottom arm lies
+under the thumbstick's circular mask region.
+
 ### D-pads glow in the direction you're pushing
 
 A d-pad is one item firing four inputs, so a companion pinned to it would light the
 whole halo whichever way your thumb went — a cross glowing evenly all round, saying
-nothing. Worse, the glow over its own face hides the arrows and the tilt, which is the
-feedback that was already there.
+nothing, and washing out the arrows and the tilt that were already the feedback.
 
 The directional zones are the way in. DeltaCore picks a d-pad's input from where inside
 it the touch landed: the "up" zone is the top third of the frame plus the extended
@@ -416,21 +530,35 @@ rectangle** is the screen the game is drawn into — a halo washing over its edg
 bright seam along the picture. Neither can slice anything, since neither has a glow to
 be cut, so a halo doesn't stop at them: it keeps its reach and *fades out* over the last
 few points before crossing, and the widest even ring that clears them is put back
-underneath. That is the whole reason the shoulder buttons on these skins bloom out over
-the save and load buttons beside them while the screen edge above stays clean, and it's
-why they report `keeps 50–54%` — the missing half is bloom that would have landed on the
-display.
+underneath. That is the whole reason a d-pad's arm can reach out over the save and load
+buttons beside it while the screen the game draws into stays clean.
+
+The one line that isn't soft after all is the edge of the display where a button sits
+*on* it, which is where every shoulder button here sits. See above: no ring around a
+flush button is ever dark before that edge, so the fade costs it the ring — and a
+shoulder's ring is now all the glow it has.
 
 Which leaves the gap between two pieces of artwork, split half each — the only split
 that doesn't depend on which was measured first. Each halo takes the longest reach that
 fits in its half and stays dark along every rectangle it isn't shown inside, and comes
 out even all the way round; an even short halo looks better than a long one with a bite
-out of it. Bounding boxes are a blunt instrument for measuring that gap, since four
+out of it.
+
+For a **round** button that is stricter still: it takes the reach that fits on every side
+at once and keeps it, rather than reaching further where it can and fading out where it
+can't. The fade is more light, but it isn't a circle — wide and bright on the open side,
+pinched towards the neighbour — and on a ring around a round button that reads as a defect
+however much glow it adds. It costs a few points on the crowded skins and is worth them.
+D-pads keep the fade, being one-sided by design; the shoulders kept it for their bloom and
+don't need it now that an outline is all they take. And a round button that fits no even
+circle at all
+keeps the faded one rather than going dark — lopsided beats unlit — which on these seven
+skins is one button, the N64's landscape `b`. Bounding boxes are a blunt instrument for measuring that gap, since four
 round buttons in a diamond have boxes overlapping at the corners while the buttons are
 half an inch apart, so the silhouette itself is grown a pixel at a time until it touches
 something. Then, once every halo is placed, they take turns growing a step further into
 whatever is really free, each step kept only while every mask it touches stays dark
-along its edges. On the SNES that pass is worth 9pt → 10.7pt on the face diamond and
+along its edges. On the SNES that pass is worth 9pt → 12.3pt on the face diamond and
 27pt → the full 36pt on the d-pad.
 
 A cluster grows as one unit through all of that: the step is drawn for the whole set and
@@ -446,9 +574,10 @@ There is an arithmetic ceiling to all of this that no amount of care gets past. 
 button's companion is one circle of its own radius plus the aura, and that circle already
 contains the button's frame, so what two neighbours may have between them is the distance
 between their centres less one button's width — 235 pixels less 190 on the DSXL diamond,
-about 22 each. Measured they get 8, the rest going on the rim the silhouette has to be
-grown out through first. Shrinking the frames would buy nothing, since the companion
-swallowed them anyway. This is why `--glow-points 36` lands as 8.3pt on that diamond and
+about 22 each. Measured, the glow shows out to 20 of them — so that ceiling is where the
+diamond now sits, and the rest of the room went on the rim the silhouette has to be grown
+out through first. Shrinking the frames would buy nothing, since the companion
+swallowed them anyway. This is why `--glow-points 36` lands as 9.0pt on that diamond and
 the full 36 on a d-pad with a corner of the shell to itself: the number is a ceiling, and
 what a crowded cluster gets is set by its neighbours' centres and its own bevel.
 
@@ -477,11 +606,12 @@ a press reveals: a combo item like `a+b` lights only two of a group of four, so 
 reveal set is closed over the group of *every* halo the touch lights, or the other two
 get sliced off inside the two that were revealed.
 
-One thing a fade like that can spoil is the button's own face. A neighbour's region can
-cross the artwork itself, and a ramp there dims part of the button while you're
-holding it, which reads as the button lighting unevenly — worse than a glow that simply
-doesn't reach. So a halo in that position drops the wash over its own face and keeps
-to a rim, unless the clipping has taken so much of the rim that the wash is all it has.
+None of this touches the button's own face (`FACE_FRACTION`, zero). A wash there lifts
+the whole button towards the glow colour, and a button that changes colour reads as the
+wrong button rather than as a lit one — the SNES's purple A went pale lavender, the NDS's
+grey buttons paler grey — while a d-pad loses its arrows and its tilt, which are the
+feedback. Leaving the artwork alone is also what makes a fade safe: a neighbour's region
+crossing the artwork can only dim a ring that isn't there.
 
 Trimming is still there for what none of that fixes, and the tool measures the brightest
 the glow gets along the parts of the mask that really are on the outside of the union,
@@ -507,23 +637,24 @@ this, and its module docstring goes into more detail.
   their centres less one button's width between them, and no more. `--glow-share 6` will,
   at the price of neighbouring buttons lighting along with the one you pressed.
 - On a skin packed tightly enough that a neighbour's region runs across a button's own
-  artwork, that button glows as a rim rather than a lit face, and where the rim alone
-  isn't enough it keeps a wash that shades off towards the neighbour. Watch for a low
+  artwork, the ring on that side fades out instead of ending at an edge. Watch for a low
   `keeps` percentage with no `even ring`.
 - A **d-pad glows outside its own frame only**, so its feedback is a bloom past the arm
   you pushed rather than a lit cross — anything inside the frame would light in all four
   directions at once. Same for a C-pad whose buttons sit deep inside one big frame: its
-  halo has nowhere to go and comes out faint. The N64's is the worst case in these seven
-  skins — four small buttons inside a 411-unit square, inset 78–84 units from its sides,
-  which is further than the whole reach — so it glows above and below in portrait and
-  keeps only 7% in landscape, one faint nub over the top C button. The press animation
-  itself is unaffected; it's only the glow that can't get out.
+  halo has nowhere to go. The N64's is the worst case in these seven skins — four small
+  buttons inside a 411-unit square, inset 78–84 units from its sides, which is further
+  than the whole reach — so each arm keeps at best a sliver above or below its button and
+  nothing to the sides. A d-pad is judged by its **worst** arm for exactly this: a bar of
+  light off to one side of the button you pressed reads as a bug, so a pad that can't
+  light every direction goes unlit instead. Both N64 C-pads do. The press animation itself
+  is unaffected; it's only the glow that can't get out.
 - A **thick rim** is paid for twice: the silhouette is grown out through it, and the
   gap that bounds the reach shrinks by the rim on both buttons. A pair of buttons with
   wide bevels and little space between them ends up with a short halo whatever
   `--glow-points` says.
-- A **pale shell** gives white nothing to contrast against. Reach and opacity don't
-  help; `--glow-color amber` does.
+- A **pale shell** gives white nothing to contrast against. Reach and opacity don't help,
+  so the build switches that skin to amber on its own; `--glow-color` overrides it.
 - A d-pad hemmed in on all four sides can lose its glow entirely, since it only has the
   strip outside its own frame to work with.
 - The glow is baked into the `_pressed` image, so `--glow-color`, `--glow-points` and
