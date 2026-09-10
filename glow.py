@@ -479,36 +479,80 @@ def concentric(box, frame):
     return (span[0][0], span[1][0], span[0][1], span[1][1])
 
 
-def corner_radius(mask, box):
-    """The artwork's corner radius, measured off its own silhouette.
+def clipped(box, bounds, slack=FLUSH_SLACK):
+    """Which of `box`'s sides are the edge of the picture, in image pixels.
 
-    A rounded rectangle's topmost row runs from `x0 + r` to `x1 - r`, and the same
-    goes for its other three edges, so each edge measures the radius twice. The
-    median of the eight is what's taken: a flooded silhouette has a ragged pixel or
-    two somewhere on its outline, and a spike on one edge shouldn't decide the
-    shape of the whole thing."""
-    crop = mask.crop(box)
-    wide, high = crop.size
-    pixel = crop.load()
-    rows = [[x for x in range(wide) if pixel[x, y] > EDGE_TOLERANCE]
-            for y in (0, high - 1)]
-    columns = [[y for y in range(high) if pixel[x, y] > EDGE_TOLERANCE]
-               for x in (0, wide - 1)]
-    reads = []
-    for run, span in ((rows[0], wide), (rows[1], wide),
-                      (columns[0], high), (columns[1], high)):
-        if run:
-            reads += [run[0], span - 1 - run[-1]]
-    if not reads:
-        return 0.0
-    reads.sort()
-    middle = len(reads) // 2
-    median = (reads[middle] if len(reads) % 2
-              else (reads[middle - 1] + reads[middle]) / 2.0)
-    return min(median, min(wide, high) / 2.0)
+    A side that is tells you the artwork's bounding box is not the artwork's shape:
+    part of the button is off the picture, and nothing measured along that side is
+    the button's."""
+    sides = {'left'} if box[0] <= slack else set()
+    if box[1] <= slack:
+        sides.add('top')
+    if box[2] >= bounds[0] - slack:
+        sides.add('right')
+    if box[3] >= bounds[1] - slack:
+        sides.add('bottom')
+    return frozenset(sides)
 
 
-def slab(mask, box, rect):
+def widen(box, radius, cut):
+    """`box` with each side listed in `cut` pushed out far enough to fit `radius`.
+
+    A shoulder button sits on the edge of the display and runs off it, so what is
+    visible of one is a rounded rectangle with a side missing -- and its corners can
+    be rounder than anything the visible part could hold. The SNES's landscape `l`
+    shows 397x48 of a slab whose bottom corners have a radius of 52, which needs 104
+    pixels of height; the other 56 are above the top of the picture."""
+    edge = list(box)
+    if 'left' in cut:
+        edge[0] = min(edge[0], edge[2] - 2 * radius)
+    if 'right' in cut:
+        edge[2] = max(edge[2], edge[0] + 2 * radius)
+    if 'top' in cut:
+        edge[1] = min(edge[1], edge[3] - 2 * radius)
+    if 'bottom' in cut:
+        edge[3] = max(edge[3], edge[1] + 2 * radius)
+    return tuple(edge)
+
+
+def rounded(mask, box, cut):
+    """The rounded rectangle the artwork is: its own bounds, and its corner radius.
+
+    Read off the outline, a radius comes out too small. A rounded rectangle's last
+    row runs from `x0 + r` to `x1 - r` in the corner's *geometry*, but the pixels in
+    that row are the ones the arc passes through, half a pixel above its widest
+    point, so they reach `sqrt(r^2 - (r - 0.5)^2)` further out -- seven pixels on a
+    radius of 52. Measuring the DSXL's landscape shoulder that way gave 44 for a
+    corner that is actually 53.
+
+    So the radius is the one whose rounded rectangle *agrees with* the silhouette
+    best, over every pixel of it rather than its outline: on the N64's shoulder,
+    where the straight part of the side can be counted directly and settles the
+    question exactly, that is 49 against the 49.5 the count gives. Every candidate
+    takes its box from `widen`, so a shape running off the picture is fitted as the
+    whole shape it is part of."""
+    want = mask.crop(box).point(lambda v: 255 if v > EDGE_TOLERANCE else 0)
+    wide, high = want.size
+    # A radius is bounded by half the shorter side -- of the sides that are the
+    # button's own. Where neither axis is, there is nothing to bound it but the box.
+    limits = ([wide // 2] if not {'left', 'right'} & cut else []) \
+        + ([high // 2] if not {'top', 'bottom'} & cut else [])
+    best, agreement = 0, None
+    for radius in range(0, (min(limits) if limits else max(wide, high) // 2) + 1):
+        edge = widen(box, radius, cut)
+        shape = Image.new('L', (edge[2] - edge[0], edge[3] - edge[1]), 0)
+        ImageDraw.Draw(shape).rounded_rectangle(
+            (0, 0, shape.width - 1, shape.height - 1), radius=radius, fill=255)
+        at = (box[0] - edge[0], box[1] - edge[1])
+        wrong = sum(count for level, count in enumerate(ImageChops.difference(
+            shape.crop((at[0], at[1], at[0] + wide, at[1] + high)), want).histogram())
+            if level > 127)
+        if agreement is None or wrong < agreement:
+            best, agreement = radius, wrong
+    return widen(box, best, cut), best
+
+
+def slab(mask, box, frame, cut):
     """A shoulder's silhouette: one clean rounded rectangle over its artwork.
 
     Everywhere else the silhouette is the flooded artwork with the touch frame
@@ -516,18 +560,22 @@ def slab(mask, box, rect):
     a bloom twenty rings deep has smoothed them away long before its last level. An
     outline four points wide has not: every lump in the silhouette is a lump in the
     ring, and on a long button the eye follows that ring for four hundred pixels.
-    So a shoulder's silhouette is drawn rather than flooded, at the artwork's own
-    corner radius, which is also what stops the ring rounding off a corner the
-    button doesn't have."""
-    want = union(rect, box)
+    So a shoulder's silhouette is drawn rather than flooded, at the shape `rounded`
+    measures, which is also what stops the ring rounding off a corner the button
+    doesn't have -- or holding a corner where the button has an arc.
+
+    Where that shape runs off the picture it is drawn running off it, and the canvas
+    clips the raster rather than the geometry, so the arcs that are on the picture
+    are the button's arcs."""
+    edge, radius = rounded(mask, box, cut)
+    want = union(concentric(edge, frame), edge)
     grown = Image.new('L', mask.size, 0)
     ImageDraw.Draw(grown).rounded_rectangle(
-        (want[0], want[1], want[2] - 1, want[3] - 1),
-        radius=round(corner_radius(mask, box)), fill=255)
+        (want[0], want[1], want[2] - 1, want[3] - 1), radius=radius, fill=255)
     return grown
 
 
-def visible(mask, box, frame, cap, hug=False):
+def visible(mask, box, frame, cap, hug=False, cut=frozenset()):
     """The silhouette grown out to the button's visible edge, to start a halo from.
     `box` and `frame` are in `mask`'s own coordinates.
 
@@ -549,13 +597,15 @@ def visible(mask, box, frame, cap, hug=False):
     has shell in it, and the glow has no business starting out there -- so that
     one is left as it is.
 
-    `hug` asks for the shape to be the button's rather than the frame's: a frame
-    pulled in until it is centred on the artwork (`concentric`), drawn at the
-    artwork's own corner radius (`slab`). It is the shoulders that ask for it,
-    because an outline four points wide takes its whole shape from the silhouette
-    where a bloom only took its size. Square frames are left alone even then: their
-    halo is drawn from the circle inscribed in the frame, and that circle being the
-    frame's is what keeps the ring exactly round.
+    `hug` asks for the shape to be the button's rather than the frame's: the
+    rectangle `rounded` measures off the artwork, with the frame pulled in until it
+    is centred on that (`slab`). It is the shoulders that ask for it, because an
+    outline four points wide takes its whole shape from the silhouette where a bloom
+    only took its size. `cut` says which of the artwork's sides are the edge of the
+    picture, which is what lets a shoulder be fitted as the whole button it is part
+    of rather than as the part of it that shows; see `clipped`. Square frames are
+    left alone even then: their halo is drawn from the circle inscribed in the frame,
+    and that circle being the frame's is what keeps the ring exactly round.
 
     Returns the silhouette and, where the shape it grew to is a circle, that circle
     -- which is what lets the halo around it be drawn exactly round; see `radial`."""
@@ -563,7 +613,7 @@ def visible(mask, box, frame, cap, hug=False):
                                      frame[2] - box[2], frame[3] - box[3])):
         return mask, None
     if hug and abs((frame[2] - frame[0]) - (frame[3] - frame[1])) > 2 * ROUND_SLACK:
-        return slab(mask, box, concentric(box, frame)), None
+        return slab(mask, box, frame, cut), None
     filled = sum(count for level, count in enumerate(mask.histogram())
                  if level > EDGE_TOLERANCE)
     wide, high = frame[2] - frame[0], frame[3] - frame[1]
@@ -593,7 +643,7 @@ def shoulder(item):
     return bool(names) and names <= SHOULDER_INPUTS
 
 
-def footprint(art, offset, frame, pad, cross=False, hug=False):
+def footprint(art, offset, frame, pad, cross=False, hug=False, bounds=None):
     """The silhouette a halo grows from, on a canvas with room for the halo.
 
     A halo reaches further out than the crop its artwork was found in has room
@@ -606,6 +656,10 @@ def footprint(art, offset, frame, pad, cross=False, hug=False):
     Returns the mask, where its top-left corner sits in image pixels, the box its
     artwork occupies, and the circle it was grown to if it was grown to one --
     `None` where `art` is empty.
+
+    `bounds` is the size of the picture, which is the one thing about a button that
+    can't be seen in the button: whether an edge of its artwork is where the button
+    ends or where the picture does (`clipped`).
 
     This is also the boundary the item's *overlay* is cut to (`animate.py`), which
     is why it lives out here rather than inside `build`. The two have to be the
@@ -627,7 +681,8 @@ def footprint(art, offset, frame, pad, cross=False, hug=False):
                     rect[2] - origin[0], rect[3] - origin[1])
         canvas, circle = visible(canvas, local(box), local(frame),
                                  round(RIM_SHARE * min(frame[2] - frame[0],
-                                                       frame[3] - frame[1])), hug)
+                                                       frame[3] - frame[1])), hug,
+                                 clipped(box, bounds) if bounds else frozenset())
         span = canvas.getbbox()
         box = (origin[0] + span[0], origin[1] + span[1],
                origin[0] + span[2], origin[1] + span[3])
@@ -1273,7 +1328,7 @@ def build(rep, size, sources, points, ppp, report=None, sharing=GLOW_SHARE,
     for index, (art, offset) in sources.items():
         found = footprint(art, offset, frames[index],
                           round(wanted * max(1.0, CROSS_REACH)) + 4,
-                          directional(items[index]), shoulder(items[index]))
+                          directional(items[index]), shoulder(items[index]), size)
         if found is None:
             continue
         canvas, origin, box = found['mask'], found['origin'], found['box']

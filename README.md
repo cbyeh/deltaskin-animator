@@ -136,7 +136,7 @@ left over.
 
 That half-gap split is the ceiling for anything in a cluster, so a default of 36pt is
 not the size a face button comes out at — it's the size the ones with room come out at.
-On the seven skins these were built for, 10 of 69 halos take the full 36pt, the rest
+On the seven skins these were built for, 11 of 69 halos take the full 36pt, the rest
 land on a median of 8.7pt, and the ones that visibly bloom are the d-pads, which have a
 corner of the shell to themselves. Raising `--glow-points` further changes only those; a
 tighter number is what shrinks a cluster.
@@ -176,14 +176,30 @@ landscape shoulder is a 397x48 slab in a 400x54 frame with all six of those pixe
 the button, over the shell's shadow, so the ring came out level with the button's top edge
 and six pixels clear of its bottom. The frame is now pulled in until it is centred on the
 artwork (`concentric`), which can only give up reach the artwork never had. The other is
-shape: a corner radius guessed from how much of its box the silhouette fills reads a soft
-edge as a missing corner, and on a slab the guess ran past its own cap and came back a
-capsule, rounding off corners the button doesn't have. That radius is now measured off the
-artwork's outline — each of its four edges gives the radius twice, and the median of the
-eight ignores the ragged pixel — and the silhouette is *drawn* at it rather than flooded
-(`slab`), so no lump in a flood ends up as a lump in the ring. A silhouette that stops
-where the button does also takes up less room: all 18 shoulders in the set now wear their
-full 4pt, where the N64's landscape `r` had been crowded down to 2.7pt.
+shape, and a shoulder is the one button whose bounding box isn't its shape: it sits *on* the
+edge of the display with part of itself off the picture, so nothing measured along the
+missing side is the button's (`clipped`). A radius read off what shows, capped at half the
+visible height, came back a capsule — the SNES's landscape `l` shows 397x48 of a slab whose
+bottom corners have a radius of 52, needing 104 pixels of height, the other 56 of them above
+the top of the picture — and the ring stood 27px off the button's own corners. Reading the
+outline instead is unsound in its own right: a rounded rectangle's last row of pixels is the
+row the arc passes *through*, half a pixel above its widest point, so it reaches
+`sqrt(r² − (r − ½)²)` further out — seven pixels at a radius of 52, which measured the DSXL's
+shoulder at 44 for a corner that is 53. Counting the straight run of a side has the mirror
+problem, over-counting near a tangent by about `2·sqrt(3r)` lines.
+
+So the radius is the one whose rounded rectangle *agrees with* the most pixels of the
+silhouette, over the whole shape rather than an outline, with every candidate free to push
+its clipped sides off the picture so a large arc can fit (`rounded`, `widen`). On the N64's
+shoulder, where the straight run can be counted directly and settles the question, that is
+49 against 49.5. The silhouette is then *drawn* at that shape rather than flooded (`slab`),
+running off the picture where the button does — PIL clips the raster, not the geometry, so
+the arcs that are on the picture are the button's arcs — and no lump in a flood ends up as a
+lump in the ring. Fitted that way the ring follows the button's outline to within 6px where
+it had been 28px out, and 17 of the 18 shoulders in the set wear their full 4pt. The odd one
+is the N64's landscape `r`, at 2.7pt: the `l+r` combo zone between the pair sits three pixels
+nearer `r`, and `level` won't bring `l` down to match because the narrowed region leaves a
+neighbour's glow crossing its rim — a seam, which is the worse fault.
 
 Buttons the eye reads as a set come out **matching**, because a diamond of four whose
 halos differ by a couple of points looks like a mistake even where each one is
