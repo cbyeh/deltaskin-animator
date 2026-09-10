@@ -136,7 +136,7 @@ left over.
 
 That half-gap split is the ceiling for anything in a cluster, so a default of 36pt is
 not the size a face button comes out at — it's the size the ones with room come out at.
-On the seven skins these were built for, 11 of 69 halos take the full 36pt, the rest
+On the seven skins these were built for, 10 of 69 halos take the full 36pt, the rest
 land on a median of 8.7pt, and the ones that visibly bloom are the d-pads, which have a
 corner of the shell to themselves. Raising `--glow-points` further changes only those; a
 tighter number is what shrinks a cluster.
@@ -166,6 +166,24 @@ It isn't free: the plate really does extend 24px further down than the recess di
 Z button below it, which had been blooming over that bezel, is held to 7.3pt instead of
 15.3pt. That is the honest number, and a neighbour half a glow smaller beats an outline
 around the wrong shape.
+
+Finding the button isn't the whole of it either, because the silhouette a halo grows from
+isn't the artwork: it's the artwork with the touch frame filled in behind it, which is
+what carries a halo out over the bevel on softly shaded art (`visible`). A bloom twenty
+rings deep can afford that. An outline four points wide can't, and it shows up as exactly
+the two ways a frame differs from the button it belongs to. One is placement: the SNES's
+landscape shoulder is a 397x48 slab in a 400x54 frame with all six of those pixels *below*
+the button, over the shell's shadow, so the ring came out level with the button's top edge
+and six pixels clear of its bottom. The frame is now pulled in until it is centred on the
+artwork (`concentric`), which can only give up reach the artwork never had. The other is
+shape: a corner radius guessed from how much of its box the silhouette fills reads a soft
+edge as a missing corner, and on a slab the guess ran past its own cap and came back a
+capsule, rounding off corners the button doesn't have. That radius is now measured off the
+artwork's outline — each of its four edges gives the radius twice, and the median of the
+eight ignores the ragged pixel — and the silhouette is *drawn* at it rather than flooded
+(`slab`), so no lump in a flood ends up as a lump in the ring. A silhouette that stops
+where the button does also takes up less room: all 18 shoulders in the set now wear their
+full 4pt, where the N64's landscape `r` had been crowded down to 2.7pt.
 
 Buttons the eye reads as a set come out **matching**, because a diamond of four whose
 halos differ by a couple of points looks like a mistake even where each one is

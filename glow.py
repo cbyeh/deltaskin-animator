@@ -458,7 +458,76 @@ def halo(art, reach, face=FACE_FRACTION, dist=None):
     return alpha.filter(ImageFilter.GaussianBlur(sigma))
 
 
-def visible(mask, box, frame, cap):
+def concentric(box, frame):
+    """The largest rectangle inside `frame` that is centred on `box`.
+
+    `visible` grows a silhouette out to the touch frame on the grounds that the
+    frame is a rectangle centred on the button. Some of them aren't: the SNES's
+    landscape shoulder is a 397x48 slab in a 400x54 frame with all six of those
+    pixels *below* the button, over the shell's shadow. Grown to that frame the
+    silhouette ends six pixels below the button's bottom edge and level with its
+    top, so the ring outside it hangs off the bottom -- which is what a misaligned
+    outline looks like. Pulling the loose side back in until the rectangle is
+    centred on the artwork again can only give up reach the artwork never had."""
+    span = []
+    for axis in (0, 1):
+        middle = (box[axis] + box[axis + 2]) / 2.0
+        reach = min(middle - frame[axis], frame[axis + 2] - middle)
+        if reach <= 0:
+            return frame
+        span.append((round(middle - reach), round(middle + reach)))
+    return (span[0][0], span[1][0], span[0][1], span[1][1])
+
+
+def corner_radius(mask, box):
+    """The artwork's corner radius, measured off its own silhouette.
+
+    A rounded rectangle's topmost row runs from `x0 + r` to `x1 - r`, and the same
+    goes for its other three edges, so each edge measures the radius twice. The
+    median of the eight is what's taken: a flooded silhouette has a ragged pixel or
+    two somewhere on its outline, and a spike on one edge shouldn't decide the
+    shape of the whole thing."""
+    crop = mask.crop(box)
+    wide, high = crop.size
+    pixel = crop.load()
+    rows = [[x for x in range(wide) if pixel[x, y] > EDGE_TOLERANCE]
+            for y in (0, high - 1)]
+    columns = [[y for y in range(high) if pixel[x, y] > EDGE_TOLERANCE]
+               for x in (0, wide - 1)]
+    reads = []
+    for run, span in ((rows[0], wide), (rows[1], wide),
+                      (columns[0], high), (columns[1], high)):
+        if run:
+            reads += [run[0], span - 1 - run[-1]]
+    if not reads:
+        return 0.0
+    reads.sort()
+    middle = len(reads) // 2
+    median = (reads[middle] if len(reads) % 2
+              else (reads[middle - 1] + reads[middle]) / 2.0)
+    return min(median, min(wide, high) / 2.0)
+
+
+def slab(mask, box, rect):
+    """A shoulder's silhouette: one clean rounded rectangle over its artwork.
+
+    Everywhere else the silhouette is the flooded artwork with the touch frame
+    filled in behind it, and a few ragged pixels along its outline cost nothing --
+    a bloom twenty rings deep has smoothed them away long before its last level. An
+    outline four points wide has not: every lump in the silhouette is a lump in the
+    ring, and on a long button the eye follows that ring for four hundred pixels.
+    So a shoulder's silhouette is drawn rather than flooded, at the artwork's own
+    corner radius, which is also what stops the ring rounding off a corner the
+    button doesn't have."""
+    want = union(rect, box)
+    grown = Image.new('L', mask.size, 0)
+    ImageDraw.Draw(grown).rounded_rectangle(
+        (want[0], want[1], want[2] - 1, want[3] - 1),
+        radius=round(corner_radius(mask, box)), fill=255)
+    return grown
+
+
+def visible(mask, box, frame, cap, hug=False):
     """The silhouette grown out to the button's visible edge, to start a halo from.
     `box` and `frame` are in `mask`'s own coordinates.
 
@@ -480,11 +549,21 @@ def visible(mask, box, frame, cap):
     has shell in it, and the glow has no business starting out there -- so that
     one is left as it is.
 
+    `hug` asks for the shape to be the button's rather than the frame's: a frame
+    pulled in until it is centred on the artwork (`concentric`), drawn at the
+    artwork's own corner radius (`slab`). It is the shoulders that ask for it,
+    because an outline four points wide takes its whole shape from the silhouette
+    where a bloom only took its size. Square frames are left alone even then: their
+    halo is drawn from the circle inscribed in the frame, and that circle being the
+    frame's is what keeps the ring exactly round.
+
     Returns the silhouette and, where the shape it grew to is a circle, that circle
     -- which is what lets the halo around it be drawn exactly round; see `radial`."""
     if any(inset > cap for inset in (box[0] - frame[0], box[1] - frame[1],
                                      frame[2] - box[2], frame[3] - box[3])):
         return mask, None
+    if hug and abs((frame[2] - frame[0]) - (frame[3] - frame[1])) > 2 * ROUND_SLACK:
+        return slab(mask, box, concentric(box, frame)), None
     filled = sum(count for level, count in enumerate(mask.histogram())
                  if level > EDGE_TOLERANCE)
     wide, high = frame[2] - frame[0], frame[3] - frame[1]
@@ -504,7 +583,17 @@ def visible(mask, box, frame, cap):
     return grown, circle
 
 
-def footprint(art, offset, frame, pad, cross=False):
+def shoulder(item):
+    """Whether an item is one of the shoulder buttons.
+
+    A shoulder is a shoulder by its input, not its shape: `l` and `r` are drawn as a
+    capsule on some of these skins, a plain rounded slab on others and a round button
+    on the GBA, and all three want the same thin ring. See `SHOULDER_POINTS`."""
+    names = input_names(item)
+    return bool(names) and names <= SHOULDER_INPUTS
+
+
+def footprint(art, offset, frame, pad, cross=False, hug=False):
     """The silhouette a halo grows from, on a canvas with room for the halo.
 
     A halo reaches further out than the crop its artwork was found in has room
@@ -538,7 +627,7 @@ def footprint(art, offset, frame, pad, cross=False):
                     rect[2] - origin[0], rect[3] - origin[1])
         canvas, circle = visible(canvas, local(box), local(frame),
                                  round(RIM_SHARE * min(frame[2] - frame[0],
-                                                       frame[3] - frame[1])))
+                                                       frame[3] - frame[1])), hug)
         span = canvas.getbbox()
         box = (origin[0] + span[0], origin[1] + span[1],
                origin[0] + span[2], origin[1] + span[3])
@@ -1184,7 +1273,7 @@ def build(rep, size, sources, points, ppp, report=None, sharing=GLOW_SHARE,
     for index, (art, offset) in sources.items():
         found = footprint(art, offset, frames[index],
                           round(wanted * max(1.0, CROSS_REACH)) + 4,
-                          directional(items[index]))
+                          directional(items[index]), shoulder(items[index]))
         if found is None:
             continue
         canvas, origin, box = found['mask'], found['origin'], found['box']
@@ -1193,11 +1282,7 @@ def build(rep, size, sources, points, ppp, report=None, sharing=GLOW_SHARE,
         silhouettes[index] = (canvas, origin)
         arts[index] = box
     crosses = {index for index in silhouettes if directional(items[index])}
-    # A shoulder is a shoulder by its input, not its shape: `l` and `r` are drawn as a
-    # capsule on some of these skins and as a plain rounded slab on others, and both
-    # want the same thin ring. See `SHOULDER_POINTS`.
-    shoulders = {index for index in silhouettes
-                 if names[index] and names[index] <= SHOULDER_INPUTS}
+    shoulders = {index for index in silhouettes if shoulder(items[index])}
     ceiling = {index: max(1, round(SHOULDER_POINTS * ppp)) if index in shoulders
                       else wanted
                for index in silhouettes}

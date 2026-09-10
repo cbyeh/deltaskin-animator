@@ -614,7 +614,7 @@ def process(skin, out_dir, verbose=True, animating=True, glowing=False,
                 # glow can cover it the same way a button's does.
                 mark = glow.footprint(interior, at,
                                       glow.scaled(glow.frame_box(item), to_pixels),
-                                      4, is_dpad)
+                                      4, is_dpad, glow.shoulder(item))
 
             built = None
             if animating:
